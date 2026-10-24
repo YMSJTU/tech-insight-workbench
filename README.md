@@ -1,0 +1,103 @@
+# 技术洞察 · AI Agent 论文工作台
+
+第一版已实现模块一（论文搜索）和模块二（技术知识库）。模块三只保留规划入口。
+
+## 功能
+
+- 搜索 Crossref、arXiv；查询规划、候选精确去重、年份筛选、可解释排序、入选论文自动归档。
+- 上传 PDF，导入 DOI、arXiv / PDF 链接、摘要或正文；文档解析、AI 分批阅读、技术提取和原文证据校验。
+- 技术域、问题域、来源域交叉查询；论文详情包含技术机制、适用条件、局限与证据。
+- 正式技术树和问题树；Agent 提出新节点建议，接受或拒绝不阻塞论文归档。
+- 知识库内统一管理两棵分类树：逐级展开、新增、重命名、拖动调整父级；论文支持手动修改分类或恢复 AI 分类。
+- 独立 Worker、持久化父子任务、进度、取消、重试、租约恢复、共享模型调用预算。
+- 重复文献与已成功处理内容复用；补充全文或重新分析保留历史成功结果。
+
+没有模型配置时，可检索、导入和保存文献，但不会生成虚假的技术分析。任务明确显示部分完成，可配置模型后重试。
+
+## 当前本机运行
+
+默认地址：<http://127.0.0.1:8765>。API 文档：<http://127.0.0.1:8765/docs>。
+
+项目已创建 `.venv` 并安装依赖、构建前端。启动与停止：
+
+```powershell
+# 在项目根目录执行
+.\scripts\start.ps1
+.\scripts\stop.ps1
+```
+
+启动脚本在后台启动 API 和 Worker，不打开命令行窗口。日志位于 `data/api-error.log` 和 `data/worker-error.log`。不要同时运行多个 Worker。运行配置页显示 Worker 最近心跳。
+
+## 配置模型
+
+复制 `.env.example` 为 `.env`，填写可信服务商的 Chat Completions 兼容接口：
+
+```dotenv
+LLM_BASE_URL=https://你的服务地址/v1
+LLM_MODEL=模型名称
+LLM_API_KEY=你的密钥
+```
+
+BASE_URL 不包含末尾 `/chat/completions`。可信本地模型允许不设置密钥。修改配置后停止并重新启动服务；浏览器不会收到密钥，`.env` 已被 Git 忽略。模型调用将发送任务所需论文文本。
+
+搜索任务的 max_calls 是父任务及所有子任务共同的模型请求次数上限，重试也计数；不是精确货币预算。提供方未返回 token usage 时不会伪造估计。
+
+## 新环境安装
+
+需要 Python 3.12+、Node.js 20+。当前机器默认 `python` 为旧版本，不应拿它创建本项目环境；请明确选择 Python 3.12+。
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+npm ci --prefix apps/web
+npm run build --prefix apps/web
+.\scripts\start.ps1
+```
+
+如需前端热更新，运行 `npm run dev --prefix apps/web`，后端 API 仍在 8765；Vite 将 `/api` 转发给 API。
+
+手动启动进程（两个终端）：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
+.\.venv\Scripts\python.exe -m backend.worker
+```
+
+## 数据与存储
+
+默认 `data/workbench.db`（SQLite WAL）与 `data/files/`。备份时停止服务后复制整个 `data` 目录。
+
+可通过 `DATABASE_URL=postgresql+psycopg://user:password@localhost/workbench` 使用 PostgreSQL；需要提前创建数据库。本次验证覆盖 SQLite，未连接 PostgreSQL 做集成验收。schema 当前为 v1，不应在没有迁移脚本时直接替换旧表结构。
+
+## 验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\ruff.exe check backend tests scripts --select F
+npm run build --prefix apps/web
+# 只读真实来源连通性探测
+.\.venv\Scripts\python.exe -m scripts.probe_sources
+# 临时数据库中验证真实搜索、PDF 下载及解析；禁用付费模型调用
+.\.venv\Scripts\python.exe -m scripts.verify_real_pipeline
+```
+
+目前 31 项后端测试、4 项分类树前端组件测试通过；测试数据库位于临时目录，不写入用户知识库。前端组件测试命令：在 `apps/web` 下执行 `npx vitest run`。真实来源检索和 PDF 解析已通过；真实模型调用尚未验收，因为未提供模型配置。浏览器访问权限检查未通过，因此没有完成实际页面视觉与点击验收。
+
+## 当前限制
+
+- 默认单机单用户、一个 Worker；不是已完成的多用户或分布式平台。
+- 检索为文本与结构化分类筛选，暂未实现向量语义检索。
+- 不支持扫描 PDF 的 OCR；获取失败会保留可读摘要或元数据，并说明原因。
+- 最多 300 页 PDF、25 MB 文件；模型读取最多前 32 个文本块，超过范围明确提示。分批技术条目尚未做跨批语义合并。
+- 同一论文的复杂出版版本归并、跨论文技术实体合并、独立实验结果结构化和全库重分类尚未实现。
+- 通用出版方 HTML 页面不保证可抽取正文，优先使用 DOI、arXiv、公开 PDF 或上传文件。
+- 模块三的扩展探索与技术迁移验证未实现。
+
+## 文档
+
+- [4+1 系统架构](docs/02-系统架构4+1视图.md)
+- [模块二详细设计](docs/03-模块二详细设计.md)
+- [模块一详细设计](docs/04-模块一详细设计.md)
+- [实现映射、验证记录与差异](docs/05-实现与验证记录.md)
+- [知识库与分类树统一交互](docs/06-知识库与分类树交互.md)
+- [初始需求背景](docs/01-系统架构设计.md)
