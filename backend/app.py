@@ -7,7 +7,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, or_, update
-from .config import ROOT, FILES, MAX_FILE, model_ready, model_config, DATABASE_URL, DATA
+from .config import (
+    ROOT,
+    FILES,
+    MAX_FILE,
+    agent_config,
+    agent_model,
+    model_ready,
+    DATABASE_URL,
+    DATA,
+)
 from .db import (
     init_db,
     Session,
@@ -107,15 +116,17 @@ def health():
 
 @app.get("/api/settings")
 def settings():
-    c = model_config()
+    c = agent_config()
     heartbeat = DATA / "worker.heartbeat"
+    ready = model_ready()
     return {
         "worker_running": heartbeat.exists()
         and time.time() - heartbeat.stat().st_mtime < 45,
-        "model_ready": model_ready(),
-        "model": c["LLM_MODEL"],
-        "base_url": c["LLM_BASE_URL"],
-        "key_configured": bool(c["LLM_API_KEY"]),
+        "agent_ready": ready,
+        "agent_mode": "acp",
+        "agent_command": c["command"],
+        "agent_model": agent_model(),
+        "model": agent_model(),
         "database": "sqlite" if DATABASE_URL.startswith("sqlite") else "postgresql",
         "retrieval": "关键词与结构化筛选",
         "ocr": False,

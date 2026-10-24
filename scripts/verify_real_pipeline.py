@@ -8,9 +8,9 @@ from pathlib import Path
 root = Path(tempfile.mkdtemp(prefix="workbench-live-check-"))
 os.environ["DATABASE_URL"] = "sqlite:///" + str(root / "verify.db")
 os.environ["WORKBENCH_DATA"] = str(root / "data")
-os.environ["LLM_BASE_URL"] = ""
-os.environ["LLM_MODEL"] = ""
-os.environ["LLM_API_KEY"] = ""
+os.environ["ACP_COMMAND"] = ""
+os.environ["ACP_MODEL"] = ""
+os.environ["ACP_HOME"] = ""
 
 from backend.db import init_db, Session, Job, Paper, Document
 from backend.tasks import submit

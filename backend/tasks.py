@@ -111,6 +111,12 @@ def finish(id_, token, status, result=None, error=""):
         )
 
 
+def is_cancelled(job_id):
+    with Session() as s:
+        j = s.get(Job, job_id)
+        return bool(j and j.cancel_requested)
+
+
 def reserve_call(job_id):
     with Session.begin() as s:
         j = s.get(Job, job_id)

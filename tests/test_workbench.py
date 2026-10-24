@@ -42,7 +42,7 @@ def output(blocks, nodes):
 
 def mock_ai(monkeypatch):
     monkeypatch.setattr(workflows, "model_ready", lambda: True)
-    monkeypatch.setattr(workflows, "model_config", lambda: {"LLM_MODEL": "test-model"})
+    monkeypatch.setattr(workflows, "agent_model", lambda: "test-model")
 
     def extract(job_id, blocks, nodes):
         return agents.validate(output(blocks, nodes), blocks, nodes)
@@ -71,7 +71,7 @@ def test_no_model_preserves_metadata_and_document(client):
     tick()
     result = client.get("/api/jobs/" + j["id"]).json()
     assert result["status"] == "partial"
-    assert "model_not_configured" in result["result"]["warnings"][-1]
+    assert "agent_not_configured" in result["result"]["warnings"][-1]
     paper = client.get("/api/papers/" + result["result"]["paper_id"]).json()
     assert (
         paper["reading_level"] == "abstract"
@@ -126,6 +126,25 @@ def test_evidence_must_be_verbatim():
     )
     with pytest.raises(ValueError, match="逐字"):
         agents.validate(data, blocks, nodes)
+
+
+def test_evidence_allows_pdf_whitespace_differences():
+    blocks = [
+        {
+            "id": "b1",
+            "page": 1,
+            "text": "A long line with\nhyphen-\nation and  spaces.",
+        }
+    ]
+    nodes = [
+        {"id": "cache-compression", "dimension": "technology"},
+        {"id": "bandwidth", "dimension": "problem"},
+    ]
+    data = output(blocks, nodes)
+    data["techniques"][0]["evidence"][0]["quote"] = (
+        "A long line with hyphenation and spaces."
+    )
+    assert agents.validate(data, blocks, nodes)
 
 
 def test_proposal_parent_dimension_validation():
@@ -405,35 +424,39 @@ def test_uploaded_pdf_parsing(client, monkeypatch):
     ).content.startswith(b"%PDF-")
 
 
-def test_real_agent_http_contract_and_usage(monkeypatch):
-    import httpx
+def test_parse_json_handles_code_fence():
+    assert agents.parse_json('```json\n{"queries": ["cache"]}\n```') == {
+        "queries": ["cache"]
+    }
+
+
+def test_acp_protocol_round_trip(monkeypatch):
+    import sys
+    from pathlib import Path
+
+    from backend.acp_client import AcpProcess
+
+    script = Path(__file__).with_name("fake_acp_agent.py")
+    monkeypatch.setenv("ACP_COMMAND", f"{sys.executable} {script}")
+    process = AcpProcess()
+    try:
+        result = process.prompt("hello", "fake/model")
+    finally:
+        process.close()
+    assert result.text == '{"queries": ["cache compression"]}'
+    assert result.stop_reason == "end_turn"
+    assert result.usage == 42
+
+
+def test_agent_call_uses_acp_and_records_usage(monkeypatch):
+    from backend import acp_client
+
+    class Result:
+        text = '{"queries":["cache compression"]}'
+        usage = 42
 
     monkeypatch.setattr(agents, "model_ready", lambda: True)
-    monkeypatch.setattr(
-        agents,
-        "model_config",
-        lambda: {
-            "LLM_BASE_URL": "https://test.invalid/v1",
-            "LLM_MODEL": "test",
-            "LLM_API_KEY": "test-only",
-        },
-    )
-
-    def post(url, **kwargs):
-        assert url == "https://test.invalid/v1/chat/completions"
-        assert kwargs["json"]["model"] == "test"
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"message": {"content": '{"queries":["cache compression"]}'}}
-                ],
-                "usage": {"total_tokens": 42},
-            },
-            request=httpx.Request("POST", url),
-        )
-
-    monkeypatch.setattr(agents.httpx, "post", post)
+    monkeypatch.setattr(acp_client, "prompt", lambda *a, **k: Result())
     j = submit("search", {"max_calls": 2})
     assert agents.plan(j["id"], "缓存压缩") == ["cache compression"]
     with Session() as s:

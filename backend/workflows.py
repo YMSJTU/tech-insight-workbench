@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from sqlalchemy import select, func, update
-from .config import FILES, ROOT, model_ready, model_config
+from .config import FILES, ROOT, agent_model, model_ready
 from .db import (
     Session,
     Paper,
@@ -199,7 +199,7 @@ def archive(job_id, token, payload):
             {
                 "paper_id": paper_id,
                 "warnings": warnings
-                + ["model_not_configured：已保存文献，请配置模型后重试"],
+                + ["agent_not_configured：已保存文献，请配置 ACP agent 后重试"],
             },
         )
         return
@@ -212,7 +212,7 @@ def archive(job_id, token, payload):
             prior
             and not payload.get("force")
             and prior.document_id == doc_id
-            and prior.model == model_config()["LLM_MODEL"]
+            and prior.model == agent_model()
             and prior.taxonomy_version == version
             and not prior.limitations
         ):
@@ -264,7 +264,7 @@ def archive(job_id, token, payload):
         run = Run(
             paper_id=paper_id,
             document_id=doc_id,
-            model=model_config()["LLM_MODEL"],
+            model=agent_model(),
             taxonomy_version=version,
             summary="\n\n".join(o["summary"] for o in outputs),
             limitations=warnings,

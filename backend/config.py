@@ -1,4 +1,6 @@
 import os
+import shlex
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,13 +13,31 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///" + str(DATA / "workbench.db
 MAX_FILE = 25 * 1024 * 1024
 
 
-def model_config():
+def agent_config():
+    """ACP agent invocation. Model and credentials live in the agent config."""
+    try:
+        timeout = float(os.getenv("ACP_TIMEOUT", "300"))
+    except ValueError:
+        timeout = 300.0
     return {
-        k: os.getenv(k, "").strip()
-        for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY")
+        "command": os.getenv("ACP_COMMAND", "opencode acp").strip(),
+        "model": os.getenv("ACP_MODEL", "").strip(),
+        "home": os.getenv("ACP_HOME", "").strip(),
+        "timeout": timeout,
     }
 
 
+def agent_model():
+    return agent_config()["model"] or "agent-default"
+
+
 def model_ready():
-    c = model_config()
-    return bool(c["LLM_BASE_URL"] and c["LLM_MODEL"])
+    """True when the configured ACP agent executable can be located."""
+    command = agent_config()["command"]
+    if not command:
+        return False
+    try:
+        first = shlex.split(command, posix=False)[0].strip('"')
+    except ValueError:
+        return False
+    return bool(shutil.which(first) or Path(first).exists())

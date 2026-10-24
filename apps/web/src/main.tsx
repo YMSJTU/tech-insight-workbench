@@ -413,10 +413,10 @@ function App() {
         </div>
         <div className="sidebar-foot">
           <div
-            className={"connection " + (settings.model_ready ? "ready" : "")}
+            className={"connection " + (settings.agent_ready ? "ready" : "")}
           >
             <i />
-            {settings.model_ready ? "模型已配置" : "模型待配置"}
+            {settings.agent_ready ? "Agent 已就绪" : "Agent 待配置"}
           </div>
           <span>从论文到可追溯的技术知识</span>
         </div>
@@ -814,9 +814,9 @@ function App() {
                     arXiv
                   </label>
                 </div>
-                {!settings.model_ready && (
+                {!settings.agent_ready && (
                   <div className="warning">
-                    模型尚未配置：可检索并保存论文，AI
+                    ACP agent 尚未就绪：可检索并保存论文，AI
                     技术提取需配置后重试。建议先使用英文检索词。
                   </div>
                 )}
@@ -1058,37 +1058,37 @@ function App() {
                 <div>
                   <span className="eyebrow">WORKSPACE SETTINGS</span>
                   <h1>运行配置</h1>
-                  <p>模型凭证仅保存在本机服务端配置，不发送到浏览器。</p>
+                  <p>模型调用通过本机 ACP agent 会话执行，凭证由 agent 自己管理。</p>
                 </div>
               </div>
               <div className="form-card">
                 <div className="section-head">
-                  <h2>模型连接</h2>
-                  <Badge status={settings.model_ready ? "已配置" : "待配置"} />
+                  <h2>Agent 连接</h2>
+                  <Badge status={settings.agent_ready ? "已配置" : "待配置"} />
                 </div>
                 <p className="muted">
-                  在项目根目录复制 .env.example 为 .env，填写以下配置，随后重启
+                  在项目根目录 .env 中配置 ACP_COMMAND 与可选 ACP_MODEL，随后重启
                   API 与 Worker。
                 </p>
                 <pre>
-                  LLM_BASE_URL=https://你的模型服务/v1{"\n"}LLM_MODEL=模型名称
-                  {"\n"}LLM_API_KEY=服务密钥
+                  ACP_COMMAND=opencode acp{"\n"}
+                  ACP_MODEL=arkchat/doubao-seed-2.1-pro
                 </pre>
                 <div className="settings-row">
+                  <span>连接方式</span>
+                  <strong>ACP 子进程（{settings.agent_mode || "acp"}）</strong>
+                </div>
+                <div className="settings-row">
+                  <span>Agent 命令</span>
+                  <strong>{settings.agent_command || "未配置"}</strong>
+                </div>
+                <div className="settings-row">
                   <span>当前模型</span>
-                  <strong>{settings.model || "未配置"}</strong>
+                  <strong>{settings.agent_model || "由 agent 默认决定"}</strong>
                 </div>
                 <div className="settings-row">
-                  <span>服务地址</span>
-                  <strong>{settings.base_url || "未配置"}</strong>
-                </div>
-                <div className="settings-row">
-                  <span>密钥</span>
-                  <strong>
-                    {settings.key_configured
-                      ? "已设置（不显示）"
-                      : "未设置；本地模型可不需要"}
-                  </strong>
+                  <span>模型凭证</span>
+                  <strong>由 agent（opencode）管理</strong>
                 </div>
                 <div className="settings-row">
                   <span>后台 Worker</span>

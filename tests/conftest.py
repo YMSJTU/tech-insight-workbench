@@ -1,4 +1,6 @@
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 import pytest
@@ -6,11 +8,19 @@ import pytest
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="paper-workbench-tests-"))
 os.environ["DATABASE_URL"] = "sqlite:///" + str(TEST_ROOT / "test.db")
 os.environ["WORKBENCH_DATA"] = str(TEST_ROOT / "data")
-os.environ["LLM_BASE_URL"] = ""
-os.environ["LLM_MODEL"] = ""
-os.environ["LLM_API_KEY"] = ""
+os.environ["ACP_COMMAND"] = ""
+os.environ["ACP_MODEL"] = ""
+os.environ["ACP_HOME"] = ""
 
 from backend.db import Base, engine, init_db
+
+
+def _cleanup():
+    engine.dispose()
+    shutil.rmtree(TEST_ROOT, ignore_errors=True)
+
+
+atexit.register(_cleanup)
 
 
 @pytest.fixture(autouse=True)
