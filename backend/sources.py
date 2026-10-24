@@ -235,3 +235,185 @@ def ranked(candidates, topic, year_from=None, year_to=None):
         )
         unique[key] = c
     return sorted(unique.values(), key=lambda c: c["score"], reverse=True)
+
+
+OPENALEX = "https://api.openalex.org"
+OPENALEX_MAX = 500
+FRONT_MATTER = re.compile(
+    r"^(message from|welcome|preface|foreword|copyright|title page|"
+    r"organizing committee|program committee|author index|table of contents|"
+    r"front matter|editorial|steering committee|industry track program committee)",
+    re.I,
+)
+
+
+def _openalex(path, params):
+    r = httpx.get(OPENALEX + path, params=params, headers=HEADERS, timeout=45)
+    r.raise_for_status()
+    return r.json()
+
+
+def abstract_from_inverted(index):
+    """Rebuild OpenAlex's abstract_inverted_index into readable text."""
+    if not isinstance(index, dict):
+        return ""
+    pairs = []
+    for word, positions in index.items():
+        for position in positions or []:
+            pairs.append((position, word))
+    pairs.sort(key=lambda item: item[0])
+    return " ".join(word for _, word in pairs)
+
+
+def _openalex_pdf(work):
+    for location in [work.get("best_oa_location")] + (work.get("locations") or []):
+        if location and location.get("pdf_url"):
+            return location["pdf_url"]
+    oa_url = (work.get("open_access") or {}).get("oa_url") or ""
+    if oa_url.lower().split("?")[0].endswith(".pdf"):
+        return oa_url
+    return ""
+
+
+def openalex_item(work):
+    source = ((work.get("primary_location") or {}).get("source") or {})
+    doi = norm_doi(work.get("doi") or "")
+    landing = (work.get("primary_location") or {}).get("landing_page_url") or ""
+    return {
+        "title": work.get("title") or "无标题",
+        "doi": doi,
+        "authors": [
+            (a.get("author") or {}).get("display_name", "")
+            for a in work.get("authorships") or []
+            if (a.get("author") or {}).get("display_name")
+        ],
+        "year": work.get("publication_year"),
+        "venue": source.get("display_name") or "未知来源",
+        "url": ("https://doi.org/" + doi) if doi else landing,
+        "abstract": abstract_from_inverted(work.get("abstract_inverted_index")),
+        "source": "openalex",
+        "pdf_url": _openalex_pdf(work),
+        "openalex_id": (work.get("id") or "").rsplit("/", 1)[-1],
+    }
+
+
+def _date_filters(year_from, year_to):
+    if year_from and year_to and year_from == year_to:
+        return [f"publication_year:{year_from}"]
+    filters = []
+    if year_from:
+        filters.append(f"from_publication_date:{year_from}-01-01")
+    if year_to:
+        filters.append(f"to_publication_date:{year_to}-12-31")
+    return filters
+
+
+def resolve_venue(name):
+    data = _openalex("/sources", {"search": name, "per-page": 10})
+    results = data.get("results") or []
+    if not results:
+        raise ValueError("未找到会议或期刊：" + name)
+    query = re.sub(r"[^a-z0-9 ]", " ", name.lower()).strip()
+    tokens = set(query.split())
+
+    def score(source):
+        display = (source.get("display_name") or "").lower()
+        value = 0
+        if query and query in display:
+            value += 50
+        value += len(tokens & set(re.findall(r"[a-z0-9]+", display))) * 5
+        if source.get("type") in {"conference", "journal"}:
+            value += 3
+        return value + min(source.get("works_count") or 0, 20000) / 20000
+
+    ordered = sorted(results, key=score, reverse=True)
+    best = ordered[0]
+    return {
+        "id": (best.get("id") or "").rsplit("/", 1)[-1],
+        "name": best.get("display_name") or name,
+        "type": best.get("type") or "",
+        "works_count": best.get("works_count") or 0,
+        "alternatives": [
+            item.get("display_name") for item in ordered[1:4] if item.get("display_name")
+        ],
+    }
+
+
+def openalex_venue(venue, year_from=None, year_to=None):
+    info = resolve_venue(venue)
+    filters = [f"primary_location.source.id:{info['id']}"] + _date_filters(
+        year_from, year_to
+    )
+    items = []
+    cursor = "*"
+    raw_total = 0
+    while cursor:
+        data = _openalex(
+            "/works",
+            {
+                "filter": ",".join(filters),
+                "per-page": 200,
+                "cursor": cursor,
+                "sort": "publication_date:desc",
+            },
+        )
+        for work in data.get("results") or []:
+            item = openalex_item(work)
+            if FRONT_MATTER.match(item["title"].strip()):
+                continue
+            items.append(item)
+        meta = data.get("meta") or {}
+        raw_total = meta.get("count", len(items))
+        cursor = meta.get("next_cursor")
+        if not cursor or len(items) >= OPENALEX_MAX:
+            break
+    info["raw_total"] = raw_total
+    info["filtered_out"] = max(0, raw_total - len(items))
+    info["total"] = len(items)
+    info["fetched"] = len(items)
+    info["truncated"] = bool(raw_total > len(items) + info["filtered_out"])
+    return items, info
+
+
+def openalex(query, limit, year_from=None, year_to=None):
+    safe = re.sub(r"[(),:]", " ", query)
+    filters = [f"title_and_abstract.search:{safe}"] + _date_filters(
+        year_from, year_to
+    )
+    data = _openalex(
+        "/works",
+        {
+            "filter": ",".join(filters),
+            "per-page": min(200, max(1, limit)),
+            "sort": "relevance_score:desc",
+        },
+    )
+    return [openalex_item(work) for work in data.get("results") or []]
+
+
+def ranked_venue(candidates, year_from=None, year_to=None):
+    unique = {}
+    for rank, c0 in enumerate(candidates):
+        c = dict(c0)
+        year = c.get("year")
+        if (year_from or year_to) and (
+            not year or (year_from and year < year_from) or (year_to and year > year_to)
+        ):
+            continue
+        key = identity(c)
+        provenance = {"source": c.get("source"), "query": "venue"}
+        if key in unique:
+            old = unique[key]
+            old["provenance"].append(provenance)
+            for k, v in c.items():
+                if not old.get(k) and v:
+                    old[k] = v
+            continue
+        c.update(
+            identity=key,
+            score=1 / (rank + 1),
+            reason="会议/期刊目录收录",
+            provenance=[provenance],
+        )
+        unique[key] = c
+    return list(unique.values())

@@ -73,7 +73,7 @@ def _child_env():
         if not base.is_absolute():
             base = ROOT / base
         base = base.resolve()
-        for suffix in (".config", ".local/share", ".cache", ".local/state"):
+        for suffix in (".config", ".local/share", ".cache", ".local/state", "tmp"):
             (base / suffix).mkdir(parents=True, exist_ok=True)
         env.update(
             HOME=str(base),
@@ -82,6 +82,9 @@ def _child_env():
             XDG_DATA_HOME=str(base / ".local/share"),
             XDG_CACHE_HOME=str(base / ".cache"),
             XDG_STATE_HOME=str(base / ".local/state"),
+            TMP=str(base / "tmp"),
+            TEMP=str(base / "tmp"),
+            TMPDIR=str(base / "tmp"),
         )
     return env
 

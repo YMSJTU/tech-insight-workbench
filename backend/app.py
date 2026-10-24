@@ -83,19 +83,30 @@ class ArchiveInput(BaseModel):
 
 
 class SearchInput(BaseModel):
-    topic: str = Field(min_length=2, max_length=500)
-    sources: list[Literal["crossref", "arxiv"]] = Field(
-        default_factory=lambda: ["crossref", "arxiv"], min_length=1, max_length=2
+    mode: Literal["topic", "venue"] = "topic"
+    topic: str = Field("", max_length=500)
+    venue: str = Field("", max_length=300)
+    sources: list[Literal["crossref", "arxiv", "openalex"]] = Field(
+        default_factory=lambda: ["crossref", "arxiv"],
+        min_length=1,
+        max_length=3,
     )
     year_from: int | None = Field(None, ge=1800, le=2200)
     year_to: int | None = Field(None, ge=1800, le=2200)
-    limit: int = Field(5, ge=1, le=20)
+    limit: int = Field(5, ge=1, le=200)
     max_calls: int = Field(16, ge=0, le=40)
 
     @model_validator(mode="after")
     def valid(self):
-        if not self.topic.strip():
-            raise ValueError("主题不能为空")
+        if self.mode == "topic":
+            if len(self.topic.strip()) < 2:
+                raise ValueError("主题至少需要 2 个字符")
+            if self.limit > 20:
+                raise ValueError("主题搜索最多自动归档 20 篇")
+        else:
+            if not self.venue.strip():
+                raise ValueError("请输入会议或期刊名称")
+            self.sources = ["openalex"]
         if self.year_from and self.year_to and self.year_from > self.year_to:
             raise ValueError("起始年份不能晚于结束年份")
         self.sources = list(dict.fromkeys(self.sources))

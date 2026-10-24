@@ -117,6 +117,13 @@ def is_cancelled(job_id):
         return bool(j and j.cancel_requested)
 
 
+def remaining_calls(job_id):
+    with Session() as s:
+        j = s.get(Job, job_id)
+        root = s.get(Job, j.parent_id or j.id) if j else None
+        return max(0, (root.max_calls - root.calls_used) if root else 0)
+
+
 def reserve_call(job_id):
     with Session.begin() as s:
         j = s.get(Job, job_id)

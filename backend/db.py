@@ -40,6 +40,7 @@ class Paper(Base):
     url: Mapped[str] = mapped_column(Text, default="")
     abstract: Mapped[str] = mapped_column(Text, default="")
     reading_level: Mapped[str] = mapped_column(String(20), default="metadata")
+    coverage_note: Mapped[str] = mapped_column(Text, default="")
     current_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
@@ -199,8 +200,28 @@ SEED = [
 ]
 
 
+def ensure_columns():
+    """Add columns introduced after schema v1 without rebuilding user data."""
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import OperationalError
+
+    columns = {c["name"] for c in inspect(engine).get_columns("papers")}
+    if "coverage_note" not in columns:
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE papers ADD COLUMN coverage_note TEXT DEFAULT ''")
+                )
+        except OperationalError as exc:
+            # API and Worker may migrate the same database at startup.
+            message = str(exc).lower()
+            if "duplicate column" not in message and "already exists" not in message:
+                raise
+
+
 def init_db():
     Base.metadata.create_all(engine)
+    ensure_columns()
     with Session.begin() as s:
         if not s.get(Version, 1):
             s.add(Version(version=1))

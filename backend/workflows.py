@@ -20,7 +20,14 @@ from .db import (
     uid,
     Version,
 )
-from .tasks import stage, finish, check, Cancelled, BudgetExceeded
+from .tasks import (
+    stage,
+    finish,
+    check,
+    Cancelled,
+    BudgetExceeded,
+    remaining_calls,
+)
 from . import sources, agents
 
 
@@ -155,16 +162,29 @@ def archive(job_id, token, payload):
                     full.sha256,
                 )
     if not pages:
+        note = "元数据：未获取到摘要或全文"
+        with Session.begin() as s:
+            p = s.get(Paper, paper_id)
+            p.coverage_note = note
         finish(
             job_id,
             token,
             "partial",
             {
                 "paper_id": paper_id,
+                "coverage_note": note,
                 "warnings": warnings + ["没有可阅读内容，仅保存元数据"],
             },
         )
         return
+    if kind == "fulltext":
+        note = (
+            f"全文：已解析 PDF（{len(pages)} 页）"
+            if storage
+            else "全文：已保存正文"
+        )
+    else:
+        note = "摘要：未获取到可下载全文，仅归档摘要"
     if not sha:
         sha = hashlib.sha256(json.dumps(pages, sort_keys=True).encode()).hexdigest()
     with Session.begin() as s:
@@ -191,15 +211,21 @@ def archive(job_id, token, payload):
         p = s.get(Paper, paper_id)
         if p.reading_level != "fulltext":
             p.reading_level = kind
-    if not model_ready():
+        p.coverage_note = note
+    if not model_ready() or remaining_calls(job_id) <= 0:
+        reason = (
+            "agent_not_configured：已保存文献，请配置 ACP agent 后重试"
+            if not model_ready()
+            else "model_budget_exhausted：已保存文献，未执行 AI 技术提取"
+        )
         finish(
             job_id,
             token,
             "partial",
             {
                 "paper_id": paper_id,
-                "warnings": warnings
-                + ["agent_not_configured：已保存文献，请配置 ACP agent 后重试"],
+                "coverage_note": note,
+                "warnings": warnings + [reason],
             },
         )
         return
@@ -223,6 +249,7 @@ def archive(job_id, token, payload):
                 {
                     "paper_id": paper_id,
                     "run_id": prior.id,
+                    "coverage_note": note,
                     "warnings": warnings,
                     "reused": True,
                 },
@@ -250,6 +277,7 @@ def archive(job_id, token, payload):
             "partial",
             {
                 "paper_id": paper_id,
+                "coverage_note": note,
                 "warnings": warnings + ["没有通过证据校验的技术输出"],
             },
         )
@@ -327,13 +355,19 @@ def archive(job_id, token, payload):
         s.get(Job, job_id).result = {
             "paper_id": paper_id,
             "run_id": run.id,
+            "coverage_note": note,
             "warnings": warnings,
         }
     finish(
         job_id,
         token,
         "partial" if warnings else "succeeded",
-        {"paper_id": paper_id, "run_id": run.id, "warnings": warnings},
+        {
+            "paper_id": paper_id,
+            "run_id": run.id,
+            "coverage_note": note,
+            "warnings": warnings,
+        },
     )
 
 
@@ -354,35 +388,94 @@ def search(job_id, token, payload):
         if previous.get("discovery_complete"):
             finish(job_id, token, "waiting", previous)
             return
-    stage(job_id, token, "生成检索计划")
+    mode = payload.get("mode") or "topic"
     warnings = []
-    queries = [payload["topic"]]
-    if model_ready() and payload.get("max_calls", 16) > 0:
+    venue_info = None
+    if mode == "venue":
+        stage(job_id, token, "解析会议/期刊")
         try:
-            queries = agents.plan(job_id, payload["topic"])
-        except Cancelled:
-            raise
+            candidates, venue_info = sources.openalex_venue(
+                payload["venue"],
+                payload.get("year_from"),
+                payload.get("year_to"),
+            )
         except Exception as exc:
-            warnings.append("查询规划回退原始主题：" + safe_error(exc))
-    candidates = []
-    successes = 0
-    for source in payload["sources"]:
-        for query in queries:
-            stage(job_id, token, "检索 " + source)
+            reason = safe_error(exc)
+            finish(
+                job_id,
+                token,
+                "failed",
+                {"mode": "venue", "warnings": [reason]},
+                error=reason,
+            )
+            return
+        if venue_info.get("alternatives"):
+            warnings.append(
+                "匹配到多个来源，使用："
+                + venue_info["name"]
+                + "（其他："
+                + "、".join(venue_info["alternatives"])
+                + "）"
+            )
+        if venue_info.get("truncated"):
+            warnings.append(
+                f"来源共有 {venue_info.get('total')} 篇，仅获取前 "
+                f"{venue_info.get('fetched')} 篇"
+            )
+        ranked = sources.ranked_venue(
+            candidates, payload.get("year_from"), payload.get("year_to")
+        )
+        queries = [payload["venue"]]
+        ranking_mode = "会议/期刊全量目录（OpenAlex）"
+        successes = 1
+    else:
+        stage(job_id, token, "生成检索计划")
+        queries = [payload["topic"]]
+        if model_ready() and payload.get("max_calls", 16) > 0:
             try:
-                items = getattr(sources, source)(
-                    query,
-                    min(60, payload["limit"] * 3),
-                    year_from=payload.get("year_from"),
-                    year_to=payload.get("year_to"),
-                )
-                candidates.extend([{**x, "query": query} for x in items])
-                successes += 1
+                queries = agents.plan(job_id, payload["topic"])
+            except Cancelled:
+                raise
             except Exception as exc:
-                warnings.append(source + "：" + safe_error(exc))
-    ranked = sources.ranked(
-        candidates, " ".join(queries), payload.get("year_from"), payload.get("year_to")
-    )
+                warnings.append("查询规划回退原始主题：" + safe_error(exc))
+        candidates = []
+        successes = 0
+        for source in payload["sources"]:
+            for query in queries:
+                stage(job_id, token, "检索 " + source)
+                try:
+                    items = getattr(sources, source)(
+                        query,
+                        min(60, payload["limit"] * 3),
+                        year_from=payload.get("year_from"),
+                        year_to=payload.get("year_to"),
+                    )
+                    candidates.extend([{**x, "query": query} for x in items])
+                    successes += 1
+                except Exception as exc:
+                    warnings.append(source + "：" + safe_error(exc))
+        ranked = sources.ranked(
+            candidates,
+            " ".join(queries),
+            payload.get("year_from"),
+            payload.get("year_to"),
+        )
+        ranking_mode = "来源排名与关键词匹配"
+        if model_ready() and remaining_calls(job_id) > 0 and len(ranked) > 1:
+            try:
+                scores = agents.rank(job_id, payload["topic"], ranked[:30])
+                for index, (score, reason) in scores.items():
+                    ranked[index]["agent_score"] = score
+                    ranked[index]["score"] = score
+                    ranked[index]["reason"] = (
+                        f"Agent 相关性 {score:.2f}：" + (reason or "与主题相关")
+                    )
+                ranked.sort(key=lambda c: c.get("agent_score", -1), reverse=True)
+                ranking_mode = "关键词召回 + ACP 语义重排"
+            except Cancelled:
+                raise
+            except Exception as exc:
+                warnings.append("相关性重排跳过：" + safe_error(exc))
     selected = ranked[: payload["limit"]]
     stage(job_id, token, "提交自动归档")
     # Child creation and discovery result are atomic, so a recovered search cannot duplicate children.
@@ -402,19 +495,22 @@ def search(job_id, token, payload):
                 s.flush()
                 c["job_id"] = child.id
         j.result = {
+            "mode": mode,
+            "venue": venue_info,
             "queries": queries,
             "candidates": ranked,
             "selected": selected,
             "warnings": warnings,
             "discovered": len(ranked),
-            "ranking_mode": "来源排名与关键词匹配",
+            "ranking_mode": ranking_mode,
             "discovery_complete": True,
         }
-    finish(
-        job_id,
-        token,
-        "waiting"
-        if selected
-        else ("failed" if successes == 0 else "partial" if warnings else "succeeded"),
-        j.result,
-    )
+    if mode == "venue":
+        status = "waiting" if selected else "succeeded"
+    else:
+        status = (
+            "waiting"
+            if selected
+            else ("failed" if successes == 0 else "partial" if warnings else "succeeded")
+        )
+    finish(job_id, token, status, j.result)

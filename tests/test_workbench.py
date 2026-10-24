@@ -464,6 +464,115 @@ def test_agent_call_uses_acp_and_records_usage(monkeypatch):
         assert row.calls_used == 1 and row.tokens_used == 42
 
 
+def test_agent_rank_validates_scores(monkeypatch):
+    monkeypatch.setattr(
+        agents,
+        "call",
+        lambda *args: {
+            "ranking": [
+                {"index": 0, "score": 0.9, "reason": "直接相关"},
+                {"index": 1, "score": 0.2, "reason": "领域不同"},
+            ]
+        },
+    )
+    result = agents.rank("job", "cache prefetching", [{"title": "A"}, {"title": "B"}])
+    assert result == {0: (0.9, "直接相关"), 1: (0.2, "领域不同")}
+
+
+def test_openalex_item_rebuilds_abstract_and_pdf():
+    work = {
+        "id": "https://openalex.org/W1",
+        "doi": "https://doi.org/10.123/ABC",
+        "title": "Cache paper",
+        "publication_year": 2024,
+        "authorships": [{"author": {"display_name": "Ada"}}],
+        "primary_location": {"source": {"display_name": "HPCA"}},
+        "open_access": {"oa_url": "https://example.org/paper.pdf"},
+        "locations": [{"pdf_url": "https://example.org/paper.pdf"}],
+        "abstract_inverted_index": {"Cache": [0], "compression": [1]},
+    }
+    candidate = sources.openalex_item(work)
+    assert candidate["doi"] == "10.123/abc"
+    assert candidate["abstract"] == "Cache compression"
+    assert candidate["pdf_url"] == "https://example.org/paper.pdf"
+    assert candidate["venue"] == "HPCA"
+
+
+def test_venue_search_discovers_all_and_marks_abstract_scope(client, monkeypatch):
+    items = [
+        {
+            "title": "HPCA Paper A",
+            "doi": "10.123/hpca-a",
+            "year": 2024,
+            "venue": "HPCA",
+            "abstract": ABSTRACT,
+            "source": "openalex",
+            "pdf_url": "",
+        },
+        {
+            "title": "HPCA Paper B",
+            "doi": "10.123/hpca-b",
+            "year": 2024,
+            "venue": "HPCA",
+            "abstract": ABSTRACT,
+            "source": "openalex",
+            "pdf_url": "",
+        },
+    ]
+    monkeypatch.setattr(
+        sources,
+        "openalex_venue",
+        lambda *args, **kwargs: (
+            items,
+            {
+                "id": "S1",
+                "name": "HPCA",
+                "type": "conference",
+                "total": 2,
+                "fetched": 2,
+                "truncated": False,
+                "alternatives": [],
+            },
+        ),
+    )
+    job = client.post(
+        "/api/search",
+        json={
+            "mode": "venue",
+            "venue": "HPCA",
+            "year_from": 2024,
+            "year_to": 2024,
+            "limit": 2,
+            "max_calls": 0,
+        },
+    ).json()
+    for _ in range(4):
+        tick()
+    parent = client.get("/api/jobs/" + job["id"]).json()
+    assert parent["result"]["mode"] == "venue"
+    assert parent["result"]["venue"]["name"] == "HPCA"
+    assert parent["result"]["discovered"] == 2
+    assert len(parent["children"]) == 2
+    papers = client.get("/api/papers").json()["items"]
+    assert len(papers) == 2
+    assert all(p["reading_level"] == "abstract" for p in papers)
+    assert all(p["coverage_note"].startswith("摘要") for p in papers)
+
+
+def test_venue_search_requires_a_name(client):
+    response = client.post("/api/search", json={"mode": "venue", "venue": " "})
+    assert response.status_code == 422
+
+
+def test_metadata_only_archive_marks_metadata_scope(client):
+    job = client.post("/api/archive", json={"title": "Metadata only"}).json()
+    tick()
+    result = client.get("/api/jobs/" + job["id"]).json()
+    paper = client.get("/api/papers/" + result["result"]["paper_id"]).json()
+    assert paper["reading_level"] == "metadata"
+    assert paper["coverage_note"].startswith("元数据")
+
+
 def test_no_pdf_text_reports_partial(client):
     from io import BytesIO
     from pypdf import PdfWriter

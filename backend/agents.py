@@ -185,3 +185,42 @@ def plan(job_id, topic):
     ):
         raise ValueError("查询规划结果无效")
     return [q[:300] for q in queries[:2]]
+
+
+def rank(job_id, topic, candidates):
+    compact = [
+        {
+            "index": index,
+            "title": item.get("title", ""),
+            "venue": item.get("venue", ""),
+            "year": item.get("year"),
+            "abstract": (item.get("abstract") or "")[:600],
+        }
+        for index, item in enumerate(candidates)
+    ]
+    data = call(
+        job_id,
+        "你是论文相关性评审。主题："
+        + topic
+        + "。只根据标题、摘要和发表来源判断候选与主题的相关性；注意区分同名不同领域"
+        "（例如网络内容缓存与处理器 Cache 预取不是同一主题）。给每个候选 0-1 分，1 最相关。"
+        '输出 {"ranking":[{"index":0,"score":0.9,"reason":"中文一句话"}]}，覆盖全部候选。候选：'
+        + json.dumps(compact, ensure_ascii=False),
+    )
+    rows = data.get("ranking")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("相关性重排结果无效")
+    result = {}
+    for row in rows:
+        index = row.get("index")
+        score = row.get("score")
+        if (
+            isinstance(index, int)
+            and 0 <= index < len(candidates)
+            and isinstance(score, (int, float))
+            and 0 <= score <= 1
+        ):
+            result[index] = (float(score), str(row.get("reason", ""))[:200])
+    if not result:
+        raise ValueError("相关性重排没有有效评分")
+    return result

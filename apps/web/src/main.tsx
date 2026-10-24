@@ -111,12 +111,15 @@ function App() {
     [busy, setBusy] = useState(false);
   const [topic, setTopic] = useState(""),
     [searchForm, setSearchForm] = useState({
+      mode: "topic",
+      venue: "",
       year_from: "",
       year_to: "",
       limit: 5,
       max_calls: 16,
       crossref: true,
       arxiv: true,
+      openalex: true,
     });
   const [importForm, setImportForm] = useState({
       title: "",
@@ -196,13 +199,19 @@ function App() {
   async function search(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
+    const venueMode = searchForm.mode === "venue";
     try {
       const j = await api("/search", "POST", {
-        topic,
-        sources: [
-          ...(searchForm.crossref ? ["crossref"] : []),
-          ...(searchForm.arxiv ? ["arxiv"] : []),
-        ],
+        mode: searchForm.mode,
+        topic: venueMode ? "" : topic,
+        venue: venueMode ? searchForm.venue : "",
+        sources: venueMode
+          ? ["openalex"]
+          : [
+              ...(searchForm.openalex ? ["openalex"] : []),
+              ...(searchForm.crossref ? ["crossref"] : []),
+              ...(searchForm.arxiv ? ["arxiv"] : []),
+            ],
         year_from: searchForm.year_from ? Number(searchForm.year_from) : null,
         year_to: searchForm.year_to ? Number(searchForm.year_to) : null,
         limit: searchForm.limit,
@@ -280,14 +289,16 @@ function App() {
           <Badge status={j.status} />
         </div>
         <p className="job-topic">
-          {j.payload.topic || j.payload.title || j.payload.doi || j.payload.url}
+          {j.payload.mode === "venue"
+            ? j.payload.venue
+            : j.payload.topic || j.payload.title || j.payload.doi || j.payload.url}
         </p>
         <div className="metric-row">
           <span>
             当前阶段<strong>{j.stage}</strong>
           </span>
           <span>
-            模型调用
+            ACP prompt
             <strong>
               {j.calls_used} / {j.max_calls}
             </strong>
@@ -295,6 +306,14 @@ function App() {
           <span>
             已返回 Token<strong>{j.tokens_used.toLocaleString()}</strong>
           </span>
+          {j.kind === "search" && j.result.discovered != null && (
+            <span>
+              发现 / 入选
+              <strong>
+                {j.result.discovered} / {j.result.selected?.length || 0}
+              </strong>
+            </span>
+          )}
         </div>
         {j.error && <div className="warning">{j.error}</div>}
         {j.result.warnings?.map((w: string, i: number) => (
@@ -304,6 +323,14 @@ function App() {
         ))}
         {j.result.queries && (
           <p className="muted">检索式：{j.result.queries.join(" / ")}</p>
+        )}
+        {j.result.venue && (
+          <p className="muted">
+            来源：{j.result.venue.name}
+            {j.result.venue.type ? `（${j.result.venue.type}）` : ""} · 共{" "}
+            {j.result.venue.total ?? j.result.discovered} 篇 ·{" "}
+            {j.result.ranking_mode}
+          </p>
         )}
         {j.result.paper_id && (
           <button
@@ -321,6 +348,9 @@ function App() {
                 <div>
                   <strong>{c.payload.title}</strong>
                   <small>{c.stage}</small>
+                  {c.result.coverage_note && (
+                    <small className="muted">{c.result.coverage_note}</small>
+                  )}
                   {c.result.warnings?.map((w: string, i: number) => (
                     <small className="warn-text" key={i}>
                       {w}
@@ -698,28 +728,82 @@ function App() {
                 </div>
               </div>
               <form onSubmit={search} className="form-card">
-                <label className="field-label">研究主题</label>
-                <textarea
-                  className="topic-input"
-                  rows={3}
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  required
-                  minLength={2}
-                  placeholder="例如：Cache compression techniques for memory bandwidth optimization"
-                />
-                <div className="suggestions">
-                  试试：
-                  {[
-                    "Cache prefetching",
-                    "Memory compression",
-                    "Compiler optimization",
-                  ].map((t) => (
-                    <button type="button" key={t} onClick={() => setTopic(t)}>
-                      {t}
-                    </button>
-                  ))}
+                <div className="search-mode">
+                  <button
+                    type="button"
+                    className={searchForm.mode === "topic" ? "active" : ""}
+                    onClick={() =>
+                      setSearchForm({
+                        ...searchForm,
+                        mode: "topic",
+                        limit: Math.min(searchForm.limit, 20),
+                      })
+                    }
+                  >
+                    按主题搜索
+                  </button>
+                  <button
+                    type="button"
+                    className={searchForm.mode === "venue" ? "active" : ""}
+                    onClick={() =>
+                      setSearchForm({ ...searchForm, mode: "venue" })
+                    }
+                  >
+                    按会议 / 期刊
+                  </button>
                 </div>
+                {searchForm.mode === "topic" ? (
+                  <>
+                    <label className="field-label">研究主题</label>
+                    <textarea
+                      className="topic-input"
+                      rows={3}
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      required
+                      minLength={2}
+                      placeholder="例如：Cache compression techniques for memory bandwidth optimization"
+                    />
+                    <div className="suggestions">
+                      试试：
+                      {[
+                        "Cache prefetching",
+                        "Memory compression",
+                        "Compiler optimization",
+                      ].map((t) => (
+                        <button
+                          type="button"
+                          key={t}
+                          onClick={() => setTopic(t)}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <label className="field-label">
+                      会议或期刊名称
+                      <input
+                        className="venue-input"
+                        value={searchForm.venue}
+                        onChange={(e) =>
+                          setSearchForm({
+                            ...searchForm,
+                            venue: e.target.value,
+                          })
+                        }
+                        required
+                        placeholder="例如：HPCA、ISCA、IEEE TC"
+                      />
+                    </label>
+                    <p className="muted">
+                      先解析来源并发现该年份范围内的全部论文，再按“最多自动归档”数量入库；能下载全文时保存
+                      PDF，否则归档摘要并标注信息范围。
+                    </p>
+                  </>
+                )}
                 <div className="form-divider" />
                 <div className="form-grid">
                   <label>
@@ -759,14 +843,18 @@ function App() {
                     <input
                       type="number"
                       min="1"
-                      max="20"
+                      max={searchForm.mode === "venue" ? 200 : 20}
                       value={searchForm.limit}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const max = searchForm.mode === "venue" ? 200 : 20;
                         setSearchForm({
                           ...searchForm,
-                          limit: Number(e.target.value),
-                        })
-                      }
+                          limit: Math.min(
+                            max,
+                            Math.max(1, Number(e.target.value) || 1),
+                          ),
+                        });
+                      }}
                     />
                   </label>
                   <label>
@@ -785,35 +873,50 @@ function App() {
                     />
                   </label>
                 </div>
-                <div className="source-options">
-                  <span>检索来源</span>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={searchForm.crossref}
-                      onChange={(e) =>
-                        setSearchForm({
-                          ...searchForm,
-                          crossref: e.target.checked,
-                        })
-                      }
-                    />
-                    Crossref
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={searchForm.arxiv}
-                      onChange={(e) =>
-                        setSearchForm({
-                          ...searchForm,
-                          arxiv: e.target.checked,
-                        })
-                      }
-                    />
-                    arXiv
-                  </label>
-                </div>
+                {searchForm.mode === "topic" && (
+                  <div className="source-options">
+                    <span>检索来源</span>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={searchForm.openalex}
+                        onChange={(e) =>
+                          setSearchForm({
+                            ...searchForm,
+                            openalex: e.target.checked,
+                          })
+                        }
+                      />
+                      OpenAlex
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={searchForm.crossref}
+                        onChange={(e) =>
+                          setSearchForm({
+                            ...searchForm,
+                            crossref: e.target.checked,
+                          })
+                        }
+                      />
+                      Crossref
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={searchForm.arxiv}
+                        onChange={(e) =>
+                          setSearchForm({
+                            ...searchForm,
+                            arxiv: e.target.checked,
+                          })
+                        }
+                      />
+                      arXiv
+                    </label>
+                  </div>
+                )}
                 {!settings.agent_ready && (
                   <div className="warning">
                     ACP agent 尚未就绪：可检索并保存论文，AI
@@ -821,11 +924,19 @@ function App() {
                   </div>
                 )}
                 <div className="form-footer">
-                  <span>搜索后自动归档，无需逐篇确认。</span>
+                  <span>
+                    能获取全文时下载 PDF；否则归档摘要或元数据，并标注信息范围。
+                  </span>
                   <button
                     className="primary"
                     disabled={
-                      busy || (!searchForm.crossref && !searchForm.arxiv)
+                      busy ||
+                      (searchForm.mode === "venue"
+                        ? !searchForm.venue.trim()
+                        : !topic.trim() ||
+                          (!searchForm.openalex &&
+                            !searchForm.crossref &&
+                            !searchForm.arxiv))
                     }
                   >
                     {busy ? (
@@ -1150,6 +1261,9 @@ function App() {
               {detail.venue} · {detail.year || "年份未知"}{" "}
               <span className="reading">{reading[detail.reading_level]}</span>
             </div>
+            {detail.coverage_note && (
+              <p className="coverage-note">{detail.coverage_note}</p>
+            )}
             <h1>{detail.title}</h1>
             <p className="muted">{detail.authors.join(" · ")}</p>
             <div className="actions">
