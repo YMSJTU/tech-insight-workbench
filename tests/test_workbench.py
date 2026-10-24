@@ -480,6 +480,9 @@ def test_agent_rank_validates_scores(monkeypatch):
 
 
 def test_openalex_item_rebuilds_abstract_and_pdf():
+    assert sources.FRONT_MATTER.match("Sponsors")
+    assert sources.FRONT_MATTER.match("Message from Program Chair")
+    assert not sources.FRONT_MATTER.match("SPPAM: Signature Pattern Prediction")
     work = {
         "id": "https://openalex.org/W1",
         "doi": "https://doi.org/10.123/ABC",

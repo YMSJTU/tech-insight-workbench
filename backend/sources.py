@@ -242,7 +242,8 @@ OPENALEX_MAX = 500
 FRONT_MATTER = re.compile(
     r"^(message from|welcome|preface|foreword|copyright|title page|"
     r"organizing committee|program committee|author index|table of contents|"
-    r"front matter|editorial|steering committee|industry track program committee)",
+    r"front matter|editorial|steering committee|industry track program committee|"
+    r"sponsors?|keynote)",
     re.I,
 )
 
