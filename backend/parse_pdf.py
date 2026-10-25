@@ -149,12 +149,50 @@ def page_markdown_blocks(page, tables, page_number):
         raw.append({"text": value, "size": block_size, "bold": bold})
 
     body = statistics.median(sizes) if sizes else 9.0
+    merged = []
+    for item in raw:
+        if (
+            merged
+            and merged[-1]["text"].endswith("-")
+            and re.match(r"^[a-z]", item["text"])
+        ):
+            merged[-1]["text"] = merged[-1]["text"][:-1] + item["text"]
+            merged[-1]["size"] = max(merged[-1]["size"], item["size"])
+            merged[-1]["bold"] = merged[-1]["bold"] or item["bold"]
+            continue
+        merged.append(item)
+    raw = merged
     page_max = max((item["size"] for item in raw), default=body)
     result = []
     title_used = False
     for item in raw:
         value = item["text"]
+        if value.startswith(("Abstract—", "Abstract–")):
+            result.append("### Abstract")
+            rest = re.split(r"[—–]", value, 1)[1].strip()
+            if rest:
+                result.append(rest)
+            continue
+        if value.startswith(("Index Terms—", "Index Terms–")):
+            result.append("### Index Terms")
+            rest = re.split(r"[—–]", value, 1)[1].strip()
+            if rest:
+                result.append(rest)
+            continue
+        if (
+            page_number == 1
+            and title_used
+            and item["size"] >= page_max * 0.8
+            and result
+            and result[-1].startswith("# ")
+        ):
+            result[-1] += " " + value
+            continue
         level = 0
+        if re.match(r"^(?:\d+(?:\.\d+)*|[IVXLC]+)\.?\s+\S", value) and len(
+            value
+        ) <= 120:
+            level = 2
         if (
             page_number == 1
             and not title_used
@@ -163,8 +201,6 @@ def page_markdown_blocks(page, tables, page_number):
         ):
             level = 1
             title_used = True
-        elif re.match(r"^\d+(?:\.\d+)*\s+\S", value) and len(value) <= 120:
-            level = 2
         elif (
             len(value) <= 120
             and item["size"] >= body * 1.35
