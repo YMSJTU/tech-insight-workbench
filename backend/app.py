@@ -3,8 +3,7 @@ import time
 from typing import Literal
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, or_, update
@@ -485,7 +484,12 @@ def paper_detail(id_: str):
         )
         documents = []
         for d in s.scalars(select(Document).where(Document.paper_id == id_)):
-            item = {k: v for k, v in asdict(d).items() if k != "pages"}
+            item = {
+                k: v
+                for k, v in asdict(d).items()
+                if k not in {"pages", "markdown"}
+            }
+            item["markdown_available"] = bool(d.markdown)
             item["assets"] = [
                 {
                     "page": page.get("page"),
@@ -528,6 +532,22 @@ def document_file(id_: str):
             media_type="application/pdf",
             filename="paper.pdf",
             content_disposition_type="inline",
+        )
+
+
+@app.get("/api/documents/{id_}/markdown")
+def document_markdown(id_: str):
+    with Session() as s:
+        d = require(s, Document, id_)
+        if not d.markdown:
+            raise HTTPException(404, "该文档还没有 Markdown 解析结果，请重新分析")
+        content = d.markdown.replace(
+            "](assets/", f"](/api/documents/{d.id}/assets/"
+        )
+        return Response(
+            content=content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": 'inline; filename="paper.md"'},
         )
 
 

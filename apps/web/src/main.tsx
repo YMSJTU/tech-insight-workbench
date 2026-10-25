@@ -1397,6 +1397,19 @@ function App() {
                     查看 PDF
                   </a>
                 ))}
+              {detail.documents
+                .filter((d: Row) => d.markdown_available)
+                .map((d: Row) => (
+                  <a
+                    key={"md-" + d.id}
+                    className="secondary"
+                    href={"/api/documents/" + d.id + "/markdown"}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    解析 Markdown
+                  </a>
+                ))}
               <button
                 className="secondary"
                 onClick={async () => {

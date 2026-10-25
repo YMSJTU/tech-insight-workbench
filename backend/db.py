@@ -54,6 +54,7 @@ class Document(Base):
     storage_name: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(20))
     pages: Mapped[list] = mapped_column(JSON, default=list)
+    markdown: Mapped[str] = mapped_column(Text, default="")
 
 
 class DownloadAttempt(Base):
@@ -248,12 +249,18 @@ def ensure_columns():
     from sqlalchemy import inspect, text
     from sqlalchemy.exc import OperationalError
 
-    columns = {c["name"] for c in inspect(engine).get_columns("papers")}
-    if "coverage_note" not in columns:
+    wanted = {
+        "papers": ("coverage_note", "TEXT DEFAULT ''"),
+        "documents": ("markdown", "TEXT DEFAULT ''"),
+    }
+    for table, (column, ddl) in wanted.items():
+        columns = {c["name"] for c in inspect(engine).get_columns(table)}
+        if column in columns:
+            continue
         try:
             with engine.begin() as connection:
                 connection.execute(
-                    text("ALTER TABLE papers ADD COLUMN coverage_note TEXT DEFAULT ''")
+                    text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
                 )
         except OperationalError as exc:
             # API and Worker may migrate the same database at startup.

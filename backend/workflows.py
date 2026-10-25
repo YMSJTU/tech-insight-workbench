@@ -55,10 +55,18 @@ def parse_file(name):
     )
     if r.returncode:
         raise ValueError("PDF 无法解析，可能加密或损坏")
-    pages = json.loads(r.stdout)
+    payload = json.loads(r.stdout)
+    if isinstance(payload, dict):
+        pages = payload.get("pages") or []
+        markdown = payload.get("markdown") or ""
+    else:
+        pages = payload
+        markdown = "\n\n".join(
+            p.get("markdown") or p.get("text", "") for p in pages
+        )
     if sum(len(p["text"].strip()) for p in pages) < 80:
         raise ValueError("PDF 可提取文本不足；扫描件需要 OCR，当前未启用")
-    return pages
+    return pages, markdown
 
 
 def record_download_attempt(paper_id, job_id, candidate, started, meta=None, error=None):
@@ -86,7 +94,7 @@ def record_download_attempt(paper_id, job_id, candidate, started, meta=None, err
 def blocks_for(pages):
     blocks = []
     for page in pages:
-        text = page["text"]
+        text = page.get("markdown") or page["text"]
         for offset in range(0, len(text), 4500):
             if text[offset : offset + 4500].strip():
                 blocks.append(
@@ -146,6 +154,7 @@ def archive(job_id, token, payload):
         j.result = {**j.result, "paper_id": paper_id, "warnings": warnings}
     stage(job_id, token, "获取与解析正文")
     pages = None
+    markdown = ""
     kind = "abstract"
     storage = c.get("storage_name", "")
     sha = c.get("sha256", "")
@@ -157,7 +166,7 @@ def archive(job_id, token, payload):
     }
     if storage:
         try:
-            pages = parse_file(storage)
+            pages, markdown = parse_file(storage)
             kind = "fulltext"
         except Exception as exc:
             warnings.append(safe_error(exc))
@@ -208,7 +217,7 @@ def archive(job_id, token, payload):
             else:
                 try:
                     storage, sha = save_file(data)
-                    pages = parse_file(storage)
+                    pages, markdown = parse_file(storage)
                     kind = "fulltext"
                 except Exception as exc:
                     parse_error = sources.DownloadError("parse_error", str(exc))
@@ -256,9 +265,11 @@ def archive(job_id, token, payload):
             warnings.append("全文获取失败：" + "、".join(classes))
     if not pages and c.get("text"):
         pages = [{"page": 1, "text": c["text"]}]
+        markdown = c["text"]
         kind = "fulltext"
     if not pages and c.get("abstract"):
         pages = [{"page": 0, "text": c["abstract"]}]
+        markdown = c["abstract"]
         kind = "abstract"
     # A metadata-only reimport must never replace an existing full-text analysis with an abstract.
     if kind != "fulltext":
@@ -274,6 +285,9 @@ def archive(job_id, token, payload):
                     full.kind,
                     full.storage_name,
                     full.sha256,
+                )
+                markdown = full.markdown or "\n\n".join(
+                    p.get("markdown") or p.get("text", "") for p in pages
                 )
     if not pages:
         note = "元数据：未获取到摘要或全文"
@@ -320,12 +334,14 @@ def archive(job_id, token, payload):
                 storage_name=storage,
                 kind=kind,
                 pages=pages,
+                markdown=markdown,
             )
             s.add(d)
             s.flush()
         else:
             d.pages = pages
             d.kind = kind
+            d.markdown = markdown
         doc_id = d.id
         p = s.get(Paper, paper_id)
         if p.reading_level != "fulltext":
