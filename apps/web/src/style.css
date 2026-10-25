@@ -997,37 +997,28 @@ header {
   padding: 9px 12px;
   margin: 10px 0 16px;
 }
-.markdown-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  background: rgba(20, 32, 24, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-.markdown-panel {
-  width: min(1000px, 94vw);
-  max-height: 92vh;
-  display: flex;
-  flex-direction: column;
+.markdown-inline {
+  margin: 18px 0 24px;
+  border: 1px solid #e2e7df;
+  border-radius: 9px;
   overflow: hidden;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 24px 70px rgba(20, 32, 24, 0.28);
+  background: #fbfcfa;
 }
-.markdown-panel > header {
+.markdown-inline-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 20px;
-  padding: 18px 26px;
+  gap: 18px;
+  padding: 14px 18px;
   border-bottom: 1px solid #edf0e8;
 }
-.markdown-panel > header h2 {
+.markdown-inline-head h3 {
   margin: 4px 0 0;
-  font-size: 17px;
+  font-size: 14px;
+}
+.markdown-inline .markdown-body {
+  max-height: 65vh;
+  padding: 18px 22px 26px;
 }
 .markdown-body {
   overflow: auto;

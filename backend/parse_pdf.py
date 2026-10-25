@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import sys
 from pathlib import Path
 
@@ -74,22 +75,121 @@ def usable_table(rows):
     ) <= 120
 
 
-def text_outside_tables(page, tables):
+def page_markdown_blocks(page, tables, page_number):
+    """Build layout-aware Markdown blocks with heading and paragraph heuristics."""
     rects = [pymupdf.Rect(table["bbox"]) for table in tables]
-    pieces = []
-    for block in page.get_text("blocks"):
-        rect = pymupdf.Rect(block[:4])
+    visual_rects = []
+    try:
+        area = page.rect.width * page.rect.height
+        visual_rects = [
+            rect
+            for rect in page.cluster_drawings()
+            if rect.width * rect.height >= area * 0.01
+        ]
+    except Exception:
+        visual_rects = []
+    for image in page.get_images(full=True):
+        try:
+            visual_rects.extend(page.get_image_rects(image[0]))
+        except Exception:
+            pass
+    raw = []
+    sizes = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        rect = pymupdf.Rect(block["bbox"])
         if any(rect.intersects(table_rect) for table_rect in rects):
             continue
-        value = (block[4] or "").strip()
-        if not value:
+        center = pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+        if any(visual_rect.contains(center) for visual_rect in visual_rects):
             continue
+        lines = []
+        block_size = 0.0
+        bold = False
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            value = "".join(span.get("text", "") for span in spans).strip()
+            if not value:
+                continue
+            lines.append(value)
+            for span in spans:
+                text = span.get("text", "")
+                if not text.strip():
+                    continue
+                size = float(span.get("size") or 0)
+                sizes.extend([size] * len(text))
+                block_size = max(block_size, size)
+                if span.get("flags", 0) & 16 or "bold" in (
+                    span.get("font") or ""
+                ).lower():
+                    bold = True
+        if not lines:
+            continue
+        value = "\n".join(lines)
         value = re.sub(r"-\s*\n\s*", "", value)
         value = re.sub(r"\s*\n\s*", " ", value)
         value = re.sub(r"\s+", " ", value).strip()
-        if value:
-            pieces.append(value)
-    return "\n\n".join(pieces)
+        if not value or re.fullmatch(r"\d{1,3}", value):
+            continue
+        if re.match(
+            r"^(?:arxiv:\s*\d|preprint\b|under review\b|accepted\b)",
+            value,
+            re.I,
+        ):
+            continue
+        if re.match(
+            r"^(?:permission to make|acm reference format|acm isbn|copyright\b|"
+            r"©|authorized licensed|this work is licensed|"
+            r"[∗*]\s*corresponding author)",
+            value,
+            re.I,
+        ):
+            continue
+        raw.append({"text": value, "size": block_size, "bold": bold})
+
+    body = statistics.median(sizes) if sizes else 9.0
+    page_max = max((item["size"] for item in raw), default=body)
+    result = []
+    title_used = False
+    for item in raw:
+        value = item["text"]
+        level = 0
+        if (
+            page_number == 1
+            and not title_used
+            and len(value) >= 10
+            and item["size"] >= page_max * 0.85
+        ):
+            level = 1
+            title_used = True
+        elif re.match(r"^\d+(?:\.\d+)*\s+\S", value) and len(value) <= 120:
+            level = 2
+        elif (
+            len(value) <= 120
+            and item["size"] >= body * 1.35
+            and not value.endswith((".", ",", ";"))
+        ):
+            level = 2
+        elif (
+            item["bold"]
+            and len(value) <= 80
+            and item["size"] >= body * 1.02
+            and not value.endswith((".", ",", ";"))
+        ):
+            level = 3
+        if value.lstrip().startswith(("•", "·")):
+            items = [
+                part.strip()
+                for part in re.split(r"\s*[•·]\s*", value)
+                if part.strip()
+            ]
+            result.append("\n".join("- " + part for part in items))
+        elif level:
+            result.append("#" * level + " " + value)
+        else:
+            result.append(value)
+    return result
 
 
 def main():
@@ -184,7 +284,10 @@ def main():
                 has_vector = bool(page.get_drawings())
             except Exception:
                 has_vector = False
-            if images or tables or has_vector:
+            figure_caption = bool(
+                re.search(r"\b(?:Figure|Fig\.)\s*\d+", text, re.I)
+            )
+            if images or (has_vector and figure_caption):
                 render = f"p{number}-page.jpg"
                 try:
                     pix = page.get_pixmap(dpi=settings["render_dpi"], alpha=False)
@@ -194,8 +297,10 @@ def main():
                 except Exception:
                     render = ""
 
-            body_text = text_outside_tables(page, tables)
-            markdown_parts = [f"## Page {number}", body_text]
+            body_blocks = page_markdown_blocks(page, tables, number)
+            if not body_blocks:
+                body_blocks = [text]
+            markdown_parts = [f"## Page {number}", *body_blocks]
             for table in tables:
                 markdown_parts.append(table_markdown(table["rows"]))
             for image in images:

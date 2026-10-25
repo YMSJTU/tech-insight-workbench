@@ -207,6 +207,7 @@ function App() {
   }, [flash]);
   async function inspect(id: string) {
     try {
+      setMarkdownView(null);
       setDetail(await api("/papers/" + id));
     } catch (e) {
       notify(e);
@@ -1445,6 +1446,28 @@ function App() {
                 重新分析
               </button>
             </div>
+            {markdownView && (
+              <section className="markdown-inline">
+                <div className="markdown-inline-head">
+                  <div>
+                    <span className="eyebrow">PARSED MARKDOWN</span>
+                    <h3>{markdownView.title}</h3>
+                  </div>
+                  <button
+                    className="icon-button"
+                    aria-label="收起解析 Markdown"
+                    onClick={() => setMarkdownView(null)}
+                  >
+                    <X />
+                  </button>
+                </div>
+                <article className="markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {markdownView.content}
+                  </ReactMarkdown>
+                </article>
+              </section>
+            )}
             <PaperCategoryEditor
               key={detail.id}
               paper={detail}
@@ -1530,39 +1553,6 @@ function App() {
                 次成功处理记录
               </p>
             )}
-          </section>
-        </div>
-      )}
-      {markdownView && (
-        <div
-          className="markdown-backdrop"
-          onClick={() => setMarkdownView(null)}
-        >
-          <section
-            className="markdown-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Markdown 解析结果"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header>
-              <div>
-                <span className="eyebrow">PARSED MARKDOWN</span>
-                <h2>{markdownView.title}</h2>
-              </div>
-              <button
-                className="icon-button"
-                aria-label="关闭 Markdown"
-                onClick={() => setMarkdownView(null)}
-              >
-                <X />
-              </button>
-            </header>
-            <article className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {markdownView.content}
-              </ReactMarkdown>
-            </article>
           </section>
         </div>
       )}
