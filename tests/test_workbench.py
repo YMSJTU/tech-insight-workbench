@@ -662,24 +662,22 @@ def test_pdf_assets_preserve_images_and_tables(client):
     result = client.get("/api/jobs/" + job["id"]).json()
     detail = client.get("/api/papers/" + result["result"]["paper_id"]).json()
     document = detail["documents"][0]
-    assets = document["assets"]
     assert document["markdown_available"] is True
-    assert any(asset["render"] for asset in assets)
-    assert any(asset["images"] for asset in assets)
-    assert any(asset["tables"] for asset in assets)
     markdown = client.get(
         "/api/documents/" + document["id"] + "/markdown"
     ).text
     assert "## Page 1" in markdown
     assert "| --- |" in markdown
     assert "![figure]" in markdown or "![page layout]" in markdown
-    assert "/api/documents/" in markdown and "/assets/" in markdown
-    render = next(asset["render"] for asset in assets if asset["render"])
-    response = client.get(
-        "/api/documents/" + document["id"] + "/assets/" + render
+    import re
+
+    image_urls = re.findall(
+        r"!\[[^\]]*\]\((/api/documents/[^)]+)\)", markdown
     )
+    assert image_urls
+    response = client.get(image_urls[0])
     assert response.status_code == 200
-    assert response.content.startswith(b"\xff\xd8")
+    assert response.content.startswith((b"\xff\xd8", b"\x89PNG"))
 
 
 def test_no_pdf_text_reports_partial(client):

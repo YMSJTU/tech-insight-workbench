@@ -490,23 +490,6 @@ def paper_detail(id_: str):
                 if k not in {"pages", "markdown"}
             }
             item["markdown_available"] = bool(d.markdown)
-            item["assets"] = [
-                {
-                    "page": page.get("page"),
-                    "render": page.get("render", ""),
-                    "images": page.get("images") or [],
-                    "tables": [
-                        {
-                            "bbox": table.get("bbox"),
-                            "rows": len(table.get("rows") or []),
-                            "preview": (table.get("rows") or [])[:3],
-                        }
-                        for table in page.get("tables") or []
-                    ],
-                }
-                for page in d.pages or []
-                if page.get("render") or page.get("images") or page.get("tables")
-            ]
             documents.append(item)
         result["documents"] = documents
         result["history"] = [

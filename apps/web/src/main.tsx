@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   BookOpen,
   Search,
@@ -118,6 +120,10 @@ function App() {
     [page, setPage] = useState(1),
     [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<Row | null>(null),
+    [markdownView, setMarkdownView] = useState<{
+      title: string;
+      content: string;
+    } | null>(null),
     [jobs, setJobs] = useState<Row[]>([]),
     [job, setJob] = useState<Row | null>(null),
     [proposals, setProposals] = useState<Row[]>([]),
@@ -202,6 +208,18 @@ function App() {
   async function inspect(id: string) {
     try {
       setDetail(await api("/papers/" + id));
+    } catch (e) {
+      notify(e);
+    }
+  }
+  async function openMarkdown(doc: Row, title: string) {
+    try {
+      const response = await fetch("/api/documents/" + doc.id + "/markdown");
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || "Markdown 读取失败");
+      }
+      setMarkdownView({ title, content: await response.text() });
     } catch (e) {
       notify(e);
     }
@@ -1400,15 +1418,13 @@ function App() {
               {detail.documents
                 .filter((d: Row) => d.markdown_available)
                 .map((d: Row) => (
-                  <a
+                  <button
                     key={"md-" + d.id}
                     className="secondary"
-                    href={"/api/documents/" + d.id + "/markdown"}
-                    target="_blank"
-                    rel="noreferrer"
+                    onClick={() => openMarkdown(d, detail.title)}
                   >
                     解析 Markdown
-                  </a>
+                  </button>
                 ))}
               <button
                 className="secondary"
@@ -1429,48 +1445,6 @@ function App() {
                 重新分析
               </button>
             </div>
-            {detail.documents?.some((d: Row) => d.assets?.length) && (
-              <details className="asset-section" open>
-                <summary>原文版面、图片与表格</summary>
-                {detail.documents
-                  .filter((d: Row) => d.assets?.length)
-                  .map((d: Row) => (
-                    <div key={d.id} className="asset-grid">
-                      {d.assets.map((asset: Row) => (
-                        <figure key={asset.page} className="asset-card">
-                          {asset.render ? (
-                            <a
-                              href={
-                                "/api/documents/" +
-                                d.id +
-                                "/assets/" +
-                                asset.render
-                              }
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              <img
-                                src={
-                                  "/api/documents/" +
-                                  d.id +
-                                  "/assets/" +
-                                  asset.render
-                                }
-                                alt={"第 " + asset.page + " 页版面"}
-                                loading="lazy"
-                              />
-                            </a>
-                          ) : null}
-                          <figcaption>
-                            第 {asset.page} 页 · 图片 {asset.images.length} ·
-                            表格 {asset.tables.length}
-                          </figcaption>
-                        </figure>
-                      ))}
-                    </div>
-                  ))}
-              </details>
-            )}
             <PaperCategoryEditor
               key={detail.id}
               paper={detail}
@@ -1556,6 +1530,39 @@ function App() {
                 次成功处理记录
               </p>
             )}
+          </section>
+        </div>
+      )}
+      {markdownView && (
+        <div
+          className="markdown-backdrop"
+          onClick={() => setMarkdownView(null)}
+        >
+          <section
+            className="markdown-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Markdown 解析结果"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header>
+              <div>
+                <span className="eyebrow">PARSED MARKDOWN</span>
+                <h2>{markdownView.title}</h2>
+              </div>
+              <button
+                className="icon-button"
+                aria-label="关闭 Markdown"
+                onClick={() => setMarkdownView(null)}
+              >
+                <X />
+              </button>
+            </header>
+            <article className="markdown-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {markdownView.content}
+              </ReactMarkdown>
+            </article>
           </section>
         </div>
       )}
