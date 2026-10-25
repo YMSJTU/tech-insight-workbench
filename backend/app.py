@@ -526,7 +526,7 @@ def document_markdown(id_: str):
             raise HTTPException(404, "该文档还没有 Markdown 解析结果，请重新分析")
         content = d.markdown.replace(
             "](assets/", f"](/api/documents/{d.id}/assets/"
-        )
+        ).replace("<br>", " ")
         return Response(
             content=content,
             media_type="text/markdown; charset=utf-8",

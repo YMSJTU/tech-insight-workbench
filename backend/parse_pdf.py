@@ -32,7 +32,7 @@ def _table_cell(value):
     return (
         ("" if value is None else str(value))
         .replace("|", "\\|")
-        .replace("\n", "<br>")
+        .replace("\n", " ")
         .strip()
     )
 
