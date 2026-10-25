@@ -277,7 +277,7 @@ def _openalex_pdf(work):
 
 
 def openalex_item(work):
-    source = ((work.get("primary_location") or {}).get("source") or {})
+    source = (work.get("primary_location") or {}).get("source") or {}
     doi = norm_doi(work.get("doi") or "")
     landing = (work.get("primary_location") or {}).get("landing_page_url") or ""
     return {
@@ -335,7 +335,9 @@ def resolve_venue(name):
         "type": best.get("type") or "",
         "works_count": best.get("works_count") or 0,
         "alternatives": [
-            item.get("display_name") for item in ordered[1:4] if item.get("display_name")
+            item.get("display_name")
+            for item in ordered[1:4]
+            if item.get("display_name")
         ],
     }
 
@@ -348,7 +350,13 @@ def openalex_venue(venue, year_from=None, year_to=None):
     items = []
     cursor = "*"
     raw_total = 0
+    processed = 0
+    filtered = 0
+    cursors = set()
     while cursor:
+        if cursor in cursors:
+            break
+        cursors.add(cursor)
         data = _openalex(
             "/works",
             {
@@ -359,28 +367,31 @@ def openalex_venue(venue, year_from=None, year_to=None):
             },
         )
         for work in data.get("results") or []:
+            if len(items) >= OPENALEX_MAX:
+                break
+            processed += 1
             item = openalex_item(work)
             if FRONT_MATTER.match(item["title"].strip()):
+                filtered += 1
                 continue
             items.append(item)
         meta = data.get("meta") or {}
         raw_total = meta.get("count", len(items))
         cursor = meta.get("next_cursor")
-        if not cursor or len(items) >= OPENALEX_MAX:
+        if not cursor or len(items) >= OPENALEX_MAX or not data.get("results"):
             break
     info["raw_total"] = raw_total
-    info["filtered_out"] = max(0, raw_total - len(items))
-    info["total"] = len(items)
+    info["filtered_out"] = filtered
+    info["processed_records"] = processed
+    info["total"] = raw_total - filtered if processed < raw_total else len(items)
     info["fetched"] = len(items)
-    info["truncated"] = bool(raw_total > len(items) + info["filtered_out"])
+    info["truncated"] = processed < raw_total
     return items, info
 
 
 def openalex(query, limit, year_from=None, year_to=None):
     safe = re.sub(r"[(),:]", " ", query)
-    filters = [f"title_and_abstract.search:{safe}"] + _date_filters(
-        year_from, year_to
-    )
+    filters = [f"title_and_abstract.search:{safe}"] + _date_filters(year_from, year_to)
     data = _openalex(
         "/works",
         {

@@ -6,6 +6,7 @@ import {
   Pencil,
   X,
   Trash2,
+  FileText,
 } from "lucide-react";
 
 export type TaxNode = {
@@ -23,6 +24,7 @@ type Props = {
   api: (path: string, method?: string, body?: unknown) => Promise<any>;
   onChange: () => Promise<void>;
   onError: (e: unknown) => void;
+  onReport?: (id: string) => void;
 };
 
 export function nodePath(nodes: TaxNode[], id: string): string {
@@ -45,6 +47,7 @@ export default function KnowledgeTree({
   api,
   onChange,
   onError,
+  onReport,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     try {
@@ -230,6 +233,15 @@ export default function KnowledgeTree({
                 {n.name}
               </button>
               <div className="category-tools">
+                {onReport && (
+                  <button
+                    title="技术总结与发展趋势"
+                    aria-label={"生成" + n.name + "技术报告"}
+                    onClick={() => onReport(n.id)}
+                  >
+                    <FileText size={12} />
+                  </button>
+                )}
                 <button
                   aria-label={"新增" + n.name + "的子分类"}
                   title="新增子分类"

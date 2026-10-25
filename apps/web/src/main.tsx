@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import "./style.css";
 import KnowledgeTree, { PaperCategoryEditor, nodePath } from "./KnowledgeTree";
+import CategoryInsights from "./CategoryInsights";
 
 type Row = Record<string, any>;
 type Node = {
@@ -87,6 +88,18 @@ function Badge({ status }: { status: string }) {
 }
 
 function App() {
+  const [reportNode, setReportNode] = useState("");
+  const [openedReport, setOpenedReport] = useState("");
+  async function openReport(id: string) {
+    try {
+      const r = await api("/reports/" + id);
+      setReportNode(r.node_id);
+      setOpenedReport(id);
+      setView("library");
+    } catch (e) {
+      notify(e);
+    }
+  }
   const libraryRequest = useRef(0);
   const [view, setView] = useState("library"),
     [nodes, setNodes] = useState<Node[]>([]),
@@ -117,6 +130,7 @@ function App() {
       year_to: "",
       limit: 5,
       max_calls: 16,
+      min_relevance: 0.45,
       crossref: true,
       arxiv: true,
       openalex: true,
@@ -216,6 +230,7 @@ function App() {
         year_to: searchForm.year_to ? Number(searchForm.year_to) : null,
         limit: searchForm.limit,
         max_calls: searchForm.max_calls,
+        min_relevance: searchForm.min_relevance,
       });
       await watch(j);
     } catch (e) {
@@ -284,14 +299,23 @@ function App() {
         <div className="section-head">
           <div>
             <span className="eyebrow">TASK DETAIL</span>
-            <h2>{j.kind === "search" ? "搜索与自动归档" : "论文归档"}</h2>
+            <h2>
+              {j.kind === "report"
+                ? "分类研究报告"
+                : j.kind === "search"
+                  ? "搜索与自动归档"
+                  : "论文归档"}
+            </h2>
           </div>
           <Badge status={j.status} />
         </div>
         <p className="job-topic">
           {j.payload.mode === "venue"
             ? j.payload.venue
-            : j.payload.topic || j.payload.title || j.payload.doi || j.payload.url}
+            : j.payload.topic ||
+              j.payload.title ||
+              j.payload.doi ||
+              j.payload.url}
         </p>
         <div className="metric-row">
           <span>
@@ -316,6 +340,20 @@ function App() {
           )}
         </div>
         {j.error && <div className="warning">{j.error}</div>}
+        {j.result.report_id && (
+          <button
+            className="primary"
+            onClick={() => openReport(j.result.report_id)}
+          >
+            查看技术报告 <ArrowUpRight size={15} />
+          </button>
+        )}
+        {j.result.semantic_threshold_applied && (
+          <p className="muted">
+            ACP 相关性阈值 {j.result.min_relevance} · 排除低分或未评分候选{" "}
+            {j.result.excluded_or_unscored} 篇
+          </p>
+        )}
         {j.result.warnings?.map((w: string, i: number) => (
           <div className="warning" key={i}>
             {w}
@@ -503,7 +541,14 @@ function App() {
                   selected={filters}
                   onSelect={(dim, id) => {
                     setFilters((f) => ({ ...f, [dim]: id }));
+                    if (id) setReportNode(id);
                     setPage(1);
+                  }}
+                  onReport={(id) => {
+                    setReportNode(id);
+                    document
+                      .getElementById("category-reports")
+                      ?.scrollIntoView({ behavior: "smooth", block: "start" });
                   }}
                   api={api}
                   onError={notify}
@@ -514,6 +559,18 @@ function App() {
                   }}
                 />
                 <div className="knowledge-results">
+                  <div id="category-reports">
+                    <CategoryInsights
+                      nodes={nodes}
+                      nodeId={reportNode}
+                      onNode={setReportNode}
+                      api={api}
+                      onJob={watch}
+                      onPaper={inspect}
+                      onError={notify}
+                      reportId={openedReport}
+                    />
+                  </div>
                   <div className="active-categories">
                     {(["technology", "problem"] as const)
                       .filter((dim) => filters[dim])
@@ -857,6 +914,25 @@ function App() {
                       }}
                     />
                   </label>
+                  {searchForm.mode === "topic" && (
+                    <label>
+                      最低 ACP 相关性
+                      <input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={searchForm.min_relevance}
+                        onChange={(e) =>
+                          setSearchForm({
+                            ...searchForm,
+                            min_relevance: Number(e.target.value),
+                          })
+                        }
+                      />
+                      <small>只对已完成 ACP 评分的候选生效</small>
+                    </label>
+                  )}
                   <label>
                     模型调用上限
                     <input
@@ -1136,7 +1212,11 @@ function App() {
                       >
                         <div>
                           <span>
-                            {j.kind === "search" ? "论文搜索" : "论文归档"}
+                            {j.kind === "report"
+                              ? "分类研究报告"
+                              : j.kind === "search"
+                                ? "论文搜索"
+                                : "论文归档"}
                           </span>
                           <Badge status={j.status} />
                         </div>
@@ -1169,7 +1249,9 @@ function App() {
                 <div>
                   <span className="eyebrow">WORKSPACE SETTINGS</span>
                   <h1>运行配置</h1>
-                  <p>模型调用通过本机 ACP agent 会话执行，凭证由 agent 自己管理。</p>
+                  <p>
+                    模型调用通过本机 ACP agent 会话执行，凭证由 agent 自己管理。
+                  </p>
                 </div>
               </div>
               <div className="form-card">
@@ -1178,8 +1260,8 @@ function App() {
                   <Badge status={settings.agent_ready ? "已配置" : "待配置"} />
                 </div>
                 <p className="muted">
-                  在项目根目录 .env 中配置 ACP_COMMAND 与可选 ACP_MODEL，随后重启
-                  API 与 Worker。
+                  在项目根目录 .env 中配置 ACP_COMMAND 与可选
+                  ACP_MODEL，随后重启 API 与 Worker。
                 </p>
                 <pre>
                   ACP_COMMAND=opencode acp{"\n"}

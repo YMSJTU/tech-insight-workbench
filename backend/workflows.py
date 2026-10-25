@@ -29,6 +29,7 @@ from .tasks import (
     remaining_calls,
 )
 from . import sources, agents
+from .reading import research_pages, merge_techniques, EXTRACT_VERSION
 
 
 def save_file(data):
@@ -178,11 +179,7 @@ def archive(job_id, token, payload):
         )
         return
     if kind == "fulltext":
-        note = (
-            f"全文：已解析 PDF（{len(pages)} 页）"
-            if storage
-            else "全文：已保存正文"
-        )
+        note = f"全文：已解析 PDF（{len(pages)} 页）" if storage else "全文：已保存正文"
     else:
         note = "摘要：未获取到可下载全文，仅归档摘要"
     if not sha:
@@ -241,6 +238,7 @@ def archive(job_id, token, payload):
             and prior.model == agent_model()
             and prior.taxonomy_version == version
             and not prior.limitations
+            and prior.prompt_version == EXTRACT_VERSION
         ):
             finish(
                 job_id,
@@ -255,7 +253,8 @@ def archive(job_id, token, payload):
                 },
             )
             return
-    blocks = blocks_for(pages)
+    body_pages, references_removed = research_pages(pages)
+    blocks = blocks_for(body_pages)
     batches = [blocks[i : i + 4] for i in range(0, len(blocks), 4)]
     if len(batches) > 8:
         warnings.append("长文超过 32 个文本块，仅处理前 8 批；总结覆盖不完整")
@@ -270,7 +269,7 @@ def archive(job_id, token, payload):
             warnings.append("部分提取失败：" + safe_error(exc))
             if isinstance(exc, BudgetExceeded):
                 break
-    if not outputs:
+    if not outputs or not any(o["techniques"] for o in outputs):
         finish(
             job_id,
             token,
@@ -282,6 +281,20 @@ def archive(job_id, token, payload):
             },
         )
         return
+    combined = merge_techniques(outputs)
+    if (
+        len(outputs) > 1
+        and len(combined["techniques"]) > 1
+        and remaining_calls(job_id) > 0
+    ):
+        stage(job_id, token, "ACP 跨批技术归并")
+        try:
+            combined = agents.consolidate(job_id, [combined])
+        except Cancelled:
+            raise
+        except Exception as exc:
+            warnings.append("语义归并失败，保留按名称合并结果：" + safe_error(exc))
+    outputs = [combined]
     stage(job_id, token, "保存技术、证据与分类")
     block_map = {b["id"]: b for b in blocks}
     with Session.begin() as s:
@@ -293,6 +306,7 @@ def archive(job_id, token, payload):
             paper_id=paper_id,
             document_id=doc_id,
             model=agent_model(),
+            prompt_version=EXTRACT_VERSION,
             taxonomy_version=version,
             summary="\n\n".join(o["summary"] for o in outputs),
             limitations=warnings,
@@ -357,6 +371,7 @@ def archive(job_id, token, payload):
             "run_id": run.id,
             "coverage_note": note,
             "warnings": warnings,
+            "references_removed": references_removed,
         }
     finish(
         job_id,
@@ -367,6 +382,7 @@ def archive(job_id, token, payload):
             "run_id": run.id,
             "coverage_note": note,
             "warnings": warnings,
+            "references_removed": references_removed,
         },
     )
 
@@ -391,6 +407,8 @@ def search(job_id, token, payload):
     mode = payload.get("mode") or "topic"
     warnings = []
     venue_info = None
+    semantic_applied = False
+    excluded_count = 0
     if mode == "venue":
         stage(job_id, token, "解析会议/期刊")
         try:
@@ -419,14 +437,18 @@ def search(job_id, token, payload):
             )
         if venue_info.get("truncated"):
             warnings.append(
-                f"来源共有 {venue_info.get('total')} 篇，仅获取前 "
-                f"{venue_info.get('fetched')} 篇"
+                f"目录有 {venue_info.get('raw_total')} 条记录，仅处理 {venue_info.get('processed_records')} 条、获取论文 "
+                f"{venue_info.get('fetched')} 篇；不能视为全量目录"
             )
         ranked = sources.ranked_venue(
             candidates, payload.get("year_from"), payload.get("year_to")
         )
         queries = [payload["venue"]]
-        ranking_mode = "会议/期刊全量目录（OpenAlex）"
+        ranking_mode = (
+            "会议/期刊目录（OpenAlex，"
+            + ("部分抓取" if venue_info.get("truncated") else "本次目录抓取完成")
+            + "）"
+        )
         successes = 1
     else:
         stage(job_id, token, "生成检索计划")
@@ -467,16 +489,26 @@ def search(job_id, token, payload):
                 for index, (score, reason) in scores.items():
                     ranked[index]["agent_score"] = score
                     ranked[index]["score"] = score
-                    ranked[index]["reason"] = (
-                        f"Agent 相关性 {score:.2f}：" + (reason or "与主题相关")
+                    ranked[index]["reason"] = f"Agent 相关性 {score:.2f}：" + (
+                        reason or "与主题相关"
                     )
                 ranked.sort(key=lambda c: c.get("agent_score", -1), reverse=True)
                 ranking_mode = "关键词召回 + ACP 语义重排"
+                semantic_applied = True
             except Cancelled:
                 raise
             except Exception as exc:
                 warnings.append("相关性重排跳过：" + safe_error(exc))
-    selected = ranked[: payload["limit"]]
+    if semantic_applied:
+        eligible = [
+            c
+            for c in ranked
+            if c.get("agent_score", -1) >= payload.get("min_relevance", 0.45)
+        ]
+        excluded_count = len(ranked) - len(eligible)
+        selected = eligible[: payload["limit"]]
+    else:
+        selected = ranked[: payload["limit"]]
     stage(job_id, token, "提交自动归档")
     # Child creation and discovery result are atomic, so a recovered search cannot duplicate children.
     with Session.begin() as s:
@@ -504,6 +536,9 @@ def search(job_id, token, payload):
             "discovered": len(ranked),
             "ranking_mode": ranking_mode,
             "discovery_complete": True,
+            "semantic_threshold_applied": semantic_applied,
+            "min_relevance": payload.get("min_relevance", 0.45),
+            "excluded_or_unscored": excluded_count,
         }
     if mode == "venue":
         status = "waiting" if selected else "succeeded"
@@ -511,6 +546,8 @@ def search(job_id, token, payload):
         status = (
             "waiting"
             if selected
-            else ("failed" if successes == 0 else "partial" if warnings else "succeeded")
+            else (
+                "failed" if successes == 0 else "partial" if warnings else "succeeded"
+            )
         )
     finish(job_id, token, status, j.result)

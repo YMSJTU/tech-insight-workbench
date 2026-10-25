@@ -6,6 +6,120 @@
   font-size: 14px;
   font-weight: 400;
 }
+.category-insights {
+  background: #edf3e8;
+  border: 1px solid #d8e5cd;
+  border-radius: 9px;
+  padding: 20px;
+  margin-bottom: 23px;
+}
+.category-insights > .section-head {
+  margin-top: 0;
+}
+.category-insights h2 {
+  font-size: 16px;
+}
+.category-insights .field-label select {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.scope-stats {
+  font-size: 11px;
+  color: #728d60;
+  margin-top: 10px;
+}
+.report-history-row {
+  background: transparent;
+  border-top: 1px solid #dbe6d2;
+  padding: 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  width: 100%;
+  font-size: 12px;
+  color: #476b46;
+  gap: 12px;
+}
+.report-history-row small {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  color: #90a17e;
+}
+.report-backdrop {
+  z-index: 19;
+}
+.report-detail {
+  width: min(900px, 92vw);
+}
+.report-section {
+  margin-top: 30px;
+}
+.report-section h2 {
+  margin-bottom: 15px;
+}
+.report-section p {
+  font-size: 13px;
+  line-height: 1.95;
+  margin: 12px 0;
+  color: #627958;
+}
+.report-citations button {
+  color: #247666;
+  background: none;
+  font-size: 11px;
+  padding: 2px 5px;
+}
+.basis {
+  font-size: 9px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-right: 7px;
+  background: #e7efdf;
+  color: #708b57;
+}
+.basis.inference {
+  background: #f7ead1;
+  color: #a38345;
+}
+.report-note {
+  font-size: 11px;
+  color: #879876;
+  margin: 6px 0;
+}
+.timeline-item {
+  display: flex;
+  gap: 20px;
+  border-left: 2px solid #c7d9b8;
+  padding: 4px 0 4px 18px;
+}
+.timeline-item > strong {
+  font-size: 16px;
+  color: #668849;
+  padding-top: 13px;
+}
+.report-source {
+  padding: 13px 0;
+  border-bottom: 1px solid #e1e8d9;
+}
+.report-source > button {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  background: none;
+  color: #3e7254;
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 0;
+}
+.report-source > small {
+  display: block;
+  color: #91a280;
+  margin-top: 6px;
+}
 
 .knowledge-layout {
   display: grid;

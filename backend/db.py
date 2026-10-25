@@ -134,6 +134,22 @@ class Proposal(Base):
     resolved_node_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
+class CategoryReport(Base):
+    __tablename__ = "category_reports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True)
+    node_id: Mapped[str] = mapped_column(String(80), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="succeeded")
+    scope: Mapped[dict] = mapped_column(JSON)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    content: Mapped[dict] = mapped_column(JSON)
+    model: Mapped[str] = mapped_column(Text)
+    prompt_version: Mapped[str] = mapped_column(String(30), default="category-v1")
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

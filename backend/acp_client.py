@@ -51,7 +51,10 @@ def _command():
     raw = agent_config()["command"]
     if not raw:
         raise AcpError("未配置 ACP_COMMAND（例如 opencode acp）")
-    parts = shlex.split(raw, posix=False)
+    parts = [
+        p[1:-1] if len(p) > 1 and p[0] == p[-1] and p[0] in {'"', "'"} else p
+        for p in shlex.split(raw, posix=False)
+    ]
     executable = parts[0].strip('"')
     resolved = shutil.which(executable) or (
         executable if Path(executable).exists() else ""
@@ -120,19 +123,23 @@ class AcpProcess:
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
-        init = self.request(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": {},
-                "clientInfo": {
-                    "name": "technical-insight-workbench",
-                    "title": "技术洞察工作台",
-                    "version": "0.1.0",
+        try:
+            init = self.request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "technical-insight-workbench",
+                        "title": "技术洞察工作台",
+                        "version": "0.1.0",
+                    },
                 },
-            },
-            timeout=min(60, self.timeout),
-        )
+                timeout=min(60, self.timeout),
+            )
+        except Exception:
+            self.close()
+            raise
         version = init.get("protocolVersion")
         if version != PROTOCOL_VERSION:
             self.close()
@@ -180,9 +187,7 @@ class AcpProcess:
         method = message["method"]
         if method == "session/request_permission":
             # The extraction prompt forbids tools; deny anything unexpected.
-            self._respond(
-                message["id"], result={"outcome": {"outcome": "cancelled"}}
-            )
+            self._respond(message["id"], result={"outcome": {"outcome": "cancelled"}})
         else:
             self._respond(message["id"], error=f"client does not support {method}")
 
@@ -190,6 +195,8 @@ class AcpProcess:
         if message.get("method") != "session/update":
             return
         params = message.get("params") or {}
+        if params.get("sessionId") != self._session_id:
+            return
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         if self._capture is None:
@@ -200,6 +207,7 @@ class AcpProcess:
                 self._capture["parts"].append(content.get("text", ""))
         elif kind == "tool_call":
             self._capture["tool_calls"] += 1
+            raise AcpError("论文任务不允许工具调用，已中止 ACP 会话")
         elif kind == "usage_update":
             cost = update.get("cost") or {}
             self._capture["cost"] = cost
@@ -225,8 +233,11 @@ class AcpProcess:
                 except AcpError:
                     raise AcpCancelled("任务已取消") from None
                 cancel_sent = True
+                deadline = min(deadline, time.time() + 5)
             if time.time() > deadline:
                 self._kill()
+                if cancel_sent:
+                    raise AcpCancelled("任务已取消，ACP 未及时响应，已终止进程")
                 raise AcpTimeout(f"ACP 请求超时：{method}")
             try:
                 line = self._queue.get(timeout=1)
@@ -261,10 +272,11 @@ class AcpProcess:
         self._session_id = session_id
         if model:
             options = {
-                option.get("id"): option
-                for option in result.get("configOptions") or []
+                option.get("id"): option for option in result.get("configOptions") or []
             }
             current = options.get("model")
+            if not current:
+                raise AcpError("ACP agent 未暴露模型配置选项，无法保证使用指定模型")
             if current and current.get("currentValue") != model:
                 values = {
                     item.get("value")
@@ -316,7 +328,7 @@ class AcpProcess:
         stop_reason = result.get("stopReason", "")
         if stop_reason == "cancelled":
             raise AcpCancelled("任务已取消")
-        if stop_reason not in {"end_turn", "max_tokens"}:
+        if stop_reason != "end_turn":
             raise AcpError(f"ACP 会话停止原因：{stop_reason}")
         usage = result.get("usage") or {}
         return AcpResult(
@@ -330,8 +342,18 @@ class AcpProcess:
     def _kill(self):
         try:
             if self.proc.poll() is None:
-                self.proc.kill()
-        except OSError:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        timeout=10,
+                    )
+                else:
+                    self.proc.kill()
+                self.proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
     def close(self):
@@ -340,6 +362,9 @@ class AcpProcess:
         self._closing = True
         try:
             if self.proc.poll() is None:
+                if os.name == "nt":
+                    self._kill()
+                    return
                 self.proc.terminate()
                 try:
                     self.proc.wait(timeout=5)

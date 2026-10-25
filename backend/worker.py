@@ -7,6 +7,7 @@ from .db import init_db, Session, Job
 from .tasks import claim, finish, aggregate, Cancelled
 from .workflows import archive, search, safe_error
 from .config import DATA
+from .insights import generate
 
 
 def single_worker_lock():
@@ -55,7 +56,9 @@ def tick():
             j = s.get(Job, id_)
             kind = j.kind
             payload = j.payload
-        {"archive": archive, "search": search}[kind](id_, token, payload)
+        {"archive": archive, "search": search, "report": generate}[kind](
+            id_, token, payload
+        )
     except Cancelled as exc:
         finish(id_, token, "cancelled", error=str(exc))
     except Exception as exc:

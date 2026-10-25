@@ -13,3 +13,5 @@ coverage/
 apps/web/dist/
 *.log
 *.tsbuildinfo
+category-acp-check-*/
+pytest-of-*/

@@ -4,6 +4,7 @@ from typing import Literal
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, or_, update
@@ -33,9 +34,11 @@ from .db import (
     uid,
     Version,
     PaperCategories,
+    CategoryReport,
 )
 from .tasks import submit, TERMINAL
 from .workflows import save_file
+from . import insights
 
 
 @asynccontextmanager
@@ -95,6 +98,7 @@ class SearchInput(BaseModel):
     year_to: int | None = Field(None, ge=1800, le=2200)
     limit: int = Field(5, ge=1, le=200)
     max_calls: int = Field(16, ge=0, le=40)
+    min_relevance: float = Field(0.45, ge=0, le=1)
 
     @model_validator(mode="after")
     def valid(self):
@@ -535,7 +539,7 @@ def reprocess(id_: str):
 def jobs():
     with Session() as s:
         return [
-            asdict(j)
+            public_job(j)
             for j in s.scalars(
                 select(Job)
                 .where(Job.parent_id == None)
@@ -550,9 +554,10 @@ def job_detail(id_: str):
     with Session() as s:
         j = require(s, Job, id_)
         return {
-            **asdict(j),
+            **public_job(j),
             "children": [
-                asdict(c) for c in s.scalars(select(Job).where(Job.parent_id == id_))
+                public_job(c)
+                for c in s.scalars(select(Job).where(Job.parent_id == id_))
             ],
         }
 
@@ -635,6 +640,137 @@ def resolve_proposal(id_: str, data: ResolveInput):
             )
         )
         return {"version": max(version, node.version), "node_id": node.id}
+
+
+def public_job(job):
+    result = asdict(job)
+    result["payload"] = {k: v for k, v in job.payload.items() if k != "snapshot"}
+    return result
+
+
+class ReportInput(BaseModel):
+    node_id: str
+    report_kind: Literal["summary", "trends"] = "summary"
+    year_from: int | None = Field(None, ge=1800, le=2200)
+    year_to: int | None = Field(None, ge=1800, le=2200)
+    max_papers: int = Field(60, ge=1, le=200)
+    max_calls: int = Field(12, ge=1, le=40)
+
+    @model_validator(mode="after")
+    def valid(self):
+        if self.year_from and self.year_to and self.year_from > self.year_to:
+            raise ValueError("起始年份不能晚于结束年份")
+        return self
+
+
+@app.get("/api/taxonomy/{id_}/report-scope")
+def report_scope(id_: str):
+    with Session() as s:
+        require(s, Node, id_)
+        snap = insights.snapshot(s, id_)
+        return {"node_name": snap["node_name"], "stats": snap["stats"]}
+
+
+@app.post("/api/reports", status_code=202)
+def create_report(data: ReportInput):
+    with Session() as s:
+        require(s, Node, data.node_id)
+        snap = insights.snapshot(
+            s, data.node_id, data.year_from, data.year_to, data.max_papers
+        )
+    if not snap["sources"]:
+        raise HTTPException(422, "该分类及子分类暂无可读论文；请先归档或调整论文分类")
+    j = submit(
+        "report",
+        {
+            **data.model_dump(),
+            "title": snap["node_name"]
+            + (" · 技术总结" if data.report_kind == "summary" else " · 发展趋势"),
+            "snapshot": snap,
+        },
+    )
+    return {"id": j["id"], "status": j["status"], "stats": snap["stats"]}
+
+
+@app.get("/api/reports")
+def reports(node_id: str = ""):
+    with Session() as s:
+        q = select(CategoryReport).order_by(CategoryReport.created_at.desc()).limit(50)
+        if node_id:
+            q = q.where(CategoryReport.node_id == node_id)
+        return [
+            {
+                "id": r.id,
+                "job_id": r.job_id,
+                "node_id": r.node_id,
+                "title": r.content["title"],
+                "kind": r.kind,
+                "status": r.status,
+                "created_at": r.created_at,
+                "stats": r.snapshot["stats"],
+                "model": r.model,
+            }
+            for r in s.scalars(q)
+        ]
+
+
+@app.get("/api/reports/{id_}")
+def report_detail(id_: str):
+    with Session() as s:
+        r = require(s, CategoryReport, id_)
+        try:
+            current = insights.snapshot(s, **r.scope)
+            stale = current["fingerprint"] != r.snapshot["fingerprint"]
+        except ValueError:
+            stale = True
+        return {**asdict(r), "stale": stale}
+
+
+@app.get("/api/reports/{id_}/export")
+def export_report(id_: str):
+    with Session() as s:
+        r = require(s, CategoryReport, id_)
+        lines = [
+            "# " + r.content["title"],
+            "",
+            f"范围：{r.snapshot['node_name']}及子分类 · {r.kind} · 模型：{r.model}",
+            "",
+        ]
+        for w in r.warnings:
+            lines += ["> " + w, ""]
+        for section in r.content["sections"]:
+            lines += ["## " + section["heading"], ""]
+            for p in section["points"]:
+                lines += [
+                    "- "
+                    + ("【推断】" if p["basis"] == "inference" else "【文献观察】")
+                    + p["text"]
+                    + " "
+                    + "".join("[" + c + "]" for c in p["citations"]),
+                    "",
+                ]
+        if r.content.get("timeline"):
+            lines += ["## 发展时间线", ""]
+            for p in r.content["timeline"]:
+                lines += [
+                    f"- {p['year']}：{p['text']} "
+                    + "".join("[" + c + "]" for c in p["citations"]),
+                    "",
+                ]
+        lines += (
+            ["## 局限", ""]
+            + ["- " + x for x in r.content["limitations"]]
+            + ["", "## 来源", ""]
+        )
+        for p in r.snapshot["sources"]:
+            lines += [
+                f"- [{p['id']}] {p['title']} ({p['year'] or '年份未知'}) — {p['venue']}；{p['material_scope']}；{p['url']}"
+            ]
+        return Response(
+            "\n".join(lines),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="report-{r.id}.md"'},
+        )
 
 
 dist = ROOT / "apps" / "web" / "dist"

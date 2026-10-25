@@ -47,7 +47,10 @@ for line in sys.stdin:
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "result": {"sessionId": "sess_fake", "configOptions": config("fake/default")},
+                "result": {
+                    "sessionId": "sess_fake",
+                    "configOptions": config("fake/default"),
+                },
             }
         )
     elif method == "session/set_config_option":

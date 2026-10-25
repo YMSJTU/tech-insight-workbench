@@ -71,8 +71,8 @@ def validate(data, blocks, nodes):
     if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
         raise ValueError("缺少 summary")
     techs = data.get("techniques")
-    if not isinstance(techs, list) or not techs:
-        raise ValueError("没有有证据的技术条目")
+    if not isinstance(techs, list):
+        raise ValueError("techniques 必须是数组")
     index = {b["id"]: b for b in blocks}
     normalized = {b["id"]: normalize_text(b["text"]) for b in blocks}
     node_map = {n["id"]: n for n in nodes}
@@ -147,6 +147,7 @@ def extract(job_id, blocks, nodes):
     prompt = (
         "阅读以下论文片段，提取有直接证据的技术；分类只用正式节点 ID，无合适节点时不分类或提出建议。不要把推测当作实验结论。"
         "每批最多 4 个技术条目，每个技术给 1-2 条证据；机制用 2-3 句中文，summary 不超过 200 字。"
+        "只提取本论文实际提出或深入分析的技术，不把相关工作或参考文献题名当作本论文贡献。没有有效技术时返回 techniques:[]。"
         "evidence.quote 直接从原文块复制一段连续原文（可包含换行），不要改写、翻译、加省略号或拼接。输出结构："
         + json.dumps(schema, ensure_ascii=False)
         + "\n正式分类："
@@ -220,7 +221,42 @@ def rank(job_id, topic, candidates):
             and isinstance(score, (int, float))
             and 0 <= score <= 1
         ):
+            if index in result:
+                raise ValueError("相关性重排有重复候选索引")
             result[index] = (float(score), str(row.get("reason", ""))[:200])
-    if not result:
-        raise ValueError("相关性重排没有有效评分")
+    if set(result) != set(range(len(candidates))):
+        raise ValueError("相关性重排必须覆盖全部候选")
     return result
+
+
+def consolidate(job_id, outputs):
+    from .reading import merge_techniques
+
+    techs = [t for o in outputs for t in o["techniques"]]
+    compact = [
+        {
+            "index": i,
+            "name": t["name"],
+            "mechanism": t["mechanism"][:900],
+            "problem": t["problem"][:300],
+        }
+        for i, t in enumerate(techs)
+    ]
+    data = call(
+        job_id,
+        '对同一论文分批提取的技术去重归并。只有同一机制的重复描述才能同组；不同策略/机制保持独立。每个索引恰好出现一次，不能遗漏。同时写不超过300字的整篇技术总结，仅依据给定条目。输出 {"summary":"整篇总结","groups":[[0,2],[1]]}。材料：'
+        + json.dumps(compact, ensure_ascii=False),
+    )
+    groups = data.get("groups")
+    if not isinstance(groups, list) or any(
+        not isinstance(g, list) or not g for g in groups
+    ):
+        raise ValueError("技术归并分组无效")
+    flat = [i for g in groups for i in g]
+    if any(type(i) is not int for i in flat) or sorted(flat) != list(range(len(techs))):
+        raise ValueError("归并必须完整且唯一覆盖所有技术条目")
+    if not isinstance(data.get("summary"), str) or not data["summary"].strip():
+        raise ValueError("归并结果缺少整篇技术总结")
+    combined = merge_techniques(outputs, groups)
+    combined["summary"] = data["summary"]
+    return combined
