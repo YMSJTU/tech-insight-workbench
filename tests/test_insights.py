@@ -339,3 +339,89 @@ def test_acp_command_handles_quoted_paths(monkeypatch, tmp_path):
     file.write_text("")
     monkeypatch.setenv("ACP_COMMAND", f'"{sys.executable}" "{file}"')
     assert _command()[1] == str(file)
+
+
+def test_retry_reuses_completed_batches(client, monkeypatch):
+    seed((2020, 2021))
+    fake_report(monkeypatch)
+    monkeypatch.setattr(insights, "batches_for", lambda src: [[p] for p in src])
+    original = insights.report_call
+    failed = [False]
+    calls = []
+
+    def unreliable(job, kind, name, src, notes=None):
+        calls.append((src[0]["id"], notes is not None))
+        if src[0]["id"] == "S002" and not failed[0]:
+            failed[0] = True
+            raise RuntimeError("temporary failure")
+        return original(job, kind, name, src, notes)
+
+    monkeypatch.setattr(insights, "report_call", unreliable)
+    j = client.post("/api/reports", json={"node_id": "arch", "max_calls": 8}).json()
+    tick()
+    assert client.get("/api/jobs/" + j["id"]).json()["status"] == "partial"
+    retry = client.post("/api/jobs/" + j["id"] + "/retry").json()
+    tick()
+    result = client.get("/api/jobs/" + retry["id"]).json()
+    assert result["status"] == "succeeded"
+    assert calls.count(("S001", False)) == 1
+    assert result["calls_used"] == 2  # missing batch and synthesis only
+
+
+def test_checkpoint_fences_cancelled_and_stale_writers():
+    from backend.execution import ReportExecution
+    from backend.tasks import submit, claim, Cancelled
+    from backend.db import Job
+
+    job = submit("report", {})
+    job_id, token = claim()
+    execution = ReportExecution(job_id, token, "model")
+    assert execution.run("batch", {"x": 1}, lambda: {"result": 1}) == {"result": 1}
+    assert execution.run("batch", {"x": 1}, lambda: pytest.fail("repeated call")) == {
+        "result": 1
+    }
+    with pytest.raises(Cancelled):
+        ReportExecution(job_id, "expired", "model").run("batch", {"x": 1}, lambda: {})
+
+    def cancel_during_call():
+        with Session.begin() as s:
+            s.get(Job, job["id"]).cancel_requested = True
+        return {"result": 2}
+
+    with pytest.raises(Cancelled):
+        execution.run("other", {}, cancel_during_call)
+
+
+def test_checkpoint_invalidates_changed_inputs_model_version():
+    from backend.execution import ReportExecution
+    from backend.tasks import submit, claim
+
+    submit("report", {})
+    job, token = claim()
+    e = ReportExecution(job, token, "m1")
+    e.run("batch", {"input": 1}, lambda: {"ok": True})
+    assert e.cached("batch", {"input": 1})
+    assert not e.cached("batch", {"input": 2})
+    assert not ReportExecution(job, token, "m2").cached("batch", {"input": 1})
+    assert not ReportExecution(job, token, "m1", version="v-next").cached(
+        "batch", {"input": 1}
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing_citation", "unknown_citation", "invalid_basis", "wrong_year"]
+)
+def test_report_quality_regression(mutation):
+    src = [{"id": "S001", "year": 2024}]
+    report = content(src)
+    point = report["sections"][0]["points"][0]
+    if mutation == "missing_citation":
+        point["citations"] = []
+    if mutation == "unknown_citation":
+        point["citations"] = ["S999"]
+    if mutation == "invalid_basis":
+        point["basis"] = "fact_without_evidence"
+    if mutation == "wrong_year":
+        report["timeline"][0]["year"] = 2000
+    with pytest.raises(ValueError):
+        insights.validate_report(report, src)

@@ -583,7 +583,7 @@ def retry(id_: str):
         j = require(s, Job, id_)
         if j.status not in {"failed", "partial", "cancelled"}:
             raise HTTPException(409, "只有失败、部分完成或取消的任务可以重试")
-        return submit(j.kind, j.payload)
+        return submit(j.kind, j.payload, resume_from=j.id)
 
 
 @app.get("/api/proposals")

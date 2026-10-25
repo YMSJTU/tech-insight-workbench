@@ -150,6 +150,18 @@ class CategoryReport(Base):
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+class WorkflowStep(Base):
+    __tablename__ = "workflow_steps"
+    __table_args__ = (UniqueConstraint("job_id", "name", "input_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    version: Mapped[str] = mapped_column(String(80))
+    output: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

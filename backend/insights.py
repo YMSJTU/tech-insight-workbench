@@ -1,139 +1,11 @@
-"""Category research reports with immutable, cited input snapshots."""
+"""Report orchestration: material snapshots, validated generation and checkpoints."""
 
-import hashlib
 import json
-from sqlalchemy import select
-from .db import (
-    Session,
-    Node,
-    Paper,
-    PaperCategories,
-    Classification,
-    Run,
-    Evidence,
-    Document,
-    CategoryReport,
-    Job,
-)
-from .config import agent_model, model_ready
-from .tasks import stage, finish, check, remaining_calls, Cancelled, BudgetExceeded
+from .config import model_ready, agent_model
+from .tasks import stage, finish, remaining_calls, Cancelled, BudgetExceeded
 from . import agents
-from .reading import research_pages
-
-
-def snapshot(s, node_id, year_from=None, year_to=None, max_papers=60):
-    nodes = s.scalars(select(Node)).all()
-    node = s.get(Node, node_id)
-    if not node:
-        raise ValueError("分类不存在")
-    subtree = {node_id}
-    while True:
-        more = {n.id for n in nodes if n.parent_id in subtree}
-        if more <= subtree:
-            break
-        subtree |= more
-    overrides = {r.paper_id: r for r in s.scalars(select(PaperCategories)).all()}
-    classes = {}
-    for c in s.scalars(
-        select(Classification).where(Classification.node_id.in_(subtree))
-    ):
-        classes.setdefault((c.paper_id, c.run_id), set()).add(c.node_id)
-    query = select(Paper).order_by(Paper.year.asc().nulls_last(), Paper.id)
-    if year_from:
-        query = query.where(Paper.year >= year_from)
-    if year_to:
-        query = query.where(Paper.year <= year_to)
-    sources = []
-    matched = 0
-    unreadable = 0
-    for p in s.scalars(query):
-        override = overrides.get(p.id)
-        selected = (
-            bool(subtree.intersection(override.node_ids))
-            if override and override.manual
-            else bool(classes.get((p.id, p.current_run_id)))
-        )
-        if not selected:
-            continue
-        matched += 1
-        r = s.get(Run, p.current_run_id) if p.current_run_id else None
-        excerpts = []
-        text = ""
-        scope = ""
-        if r:
-            text = r.summary[:2500]
-            scope = "已有技术总结及原文证据摘录"
-            for e in s.scalars(
-                select(Evidence)
-                .where(Evidence.run_id == r.id)
-                .order_by(Evidence.id)
-                .limit(5)
-            ):
-                excerpts.append(
-                    {"page": e.page, "quote": e.quote[:450], "evidence_id": e.id}
-                )
-        elif p.abstract.strip():
-            text = p.abstract[:4500]
-            scope = "原始摘要"
-        else:
-            d = s.scalar(
-                select(Document)
-                .where(Document.paper_id == p.id, Document.kind == "fulltext")
-                .order_by(Document.id)
-            )
-            if d:
-                pages, _ = research_pages(d.pages)
-                text = "\n".join(pg["text"] for pg in pages)[:4500]
-                scope = "正文开头摘录"
-        if not text.strip():
-            unreadable += 1
-            continue
-        sources.append(
-            {
-                "paper_id": p.id,
-                "title": p.title,
-                "year": p.year,
-                "venue": p.venue,
-                "url": p.url,
-                "reading_level": p.reading_level,
-                "material_scope": scope,
-                "run_id": p.current_run_id,
-                "text": text,
-                "evidence": excerpts,
-                "category_revision": override.revision if override else 0,
-            }
-        )
-    available = len(sources)
-    # Even sampling across years avoids presenting only the earliest papers as a trend.
-    if available > max_papers:
-        indices = (
-            [round(i * (available - 1) / (max_papers - 1)) for i in range(max_papers)]
-            if max_papers > 1
-            else [available - 1]
-        )
-        sources = [sources[i] for i in indices]
-    for i, item in enumerate(sources):
-        item["id"] = f"S{i + 1:03d}"
-    result = {
-        "node_id": node_id,
-        "node_name": node.name,
-        "dimension": node.dimension,
-        "subtree": sorted(subtree),
-        "taxonomy_version": max(n.version for n in nodes),
-        "sources": sources,
-        "stats": {
-            "matched": matched,
-            "readable": available,
-            "used": len(sources),
-            "metadata_only": unreadable,
-            "omitted": available - len(sources),
-            "years": sorted({p["year"] for p in sources if p["year"]}),
-        },
-    }
-    result["fingerprint"] = hashlib.sha256(
-        json.dumps(result, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
-    return result
+from .report_repository import snapshot as snapshot, saved_report, save_report
+from .execution import ReportExecution
 
 
 def batches_for(sources, max_chars=19000):
@@ -288,16 +160,16 @@ def report_call(job_id, kind, name, sources, notes=None):
 
 
 def generate(job_id, token, payload):
-    with Session() as s:
-        saved = s.scalar(select(CategoryReport).where(CategoryReport.job_id == job_id))
-        if saved:
-            finish(
-                job_id,
-                token,
-                saved.status,
-                {"report_id": saved.id, "warnings": saved.warnings},
-            )
-            return
+    saved = saved_report(job_id)
+    if saved:
+        finish(
+            job_id,
+            token,
+            saved["status"],
+            {"report_id": saved["id"], "warnings": saved["warnings"]},
+        )
+        return
+    execution = ReportExecution(job_id, token, model=agent_model())
     snap = payload["snapshot"]
     sources = snap["sources"]
     kind = payload["report_kind"]
@@ -326,13 +198,25 @@ def generate(job_id, token, payload):
     notes = []
     used = []
     for i, batch in enumerate(batches):
-        if len(batches) > 1 and remaining_calls(job_id) < 2:
+        step_input = {"kind": kind, "name": snap["node_name"], "sources": batch}
+        step_name = f"batch:{i}"
+        if (
+            not execution.cached(step_name, step_input)
+            and len(batches) > 1
+            and remaining_calls(job_id) < 2
+        ):
             warnings.append("调用预算不足，未处理全部批次。")
             partial = True
             break
         stage(job_id, token, f"OpenCode ACP 分类归纳 {i + 1}/{len(batches)}")
         try:
-            notes.append(report_call(job_id, kind, snap["node_name"], batch))
+            notes.append(
+                execution.run(
+                    step_name,
+                    step_input,
+                    lambda: report_call(job_id, kind, snap["node_name"], batch),
+                )
+            )
             used.extend(batch)
         except Cancelled:
             raise
@@ -358,32 +242,18 @@ def generate(job_id, token, payload):
         ]
         if len(json.dumps(compact_notes, ensure_ascii=False)) > 65000:
             raise ValueError("分批结果过长，请缩小分类范围或论文上限后重试")
-        content = report_call(job_id, kind, snap["node_name"], used, compact_notes)
-    snap = {**snap, "generated_source_ids": [p["id"] for p in used]}
-    with Session.begin() as s:
-        check(s, job_id, token)
-        r = CategoryReport(
-            job_id=job_id,
-            node_id=payload["node_id"],
-            kind=kind,
-            status="partial" if partial else "succeeded",
-            scope={
-                k: payload.get(k)
-                for k in ["node_id", "year_from", "year_to", "max_papers"]
+        content = execution.run(
+            "synthesis",
+            {
+                "kind": kind,
+                "name": snap["node_name"],
+                "sources": used,
+                "notes": compact_notes,
             },
-            snapshot=snap,
-            content=content,
-            model=agent_model(),
-            warnings=warnings,
+            lambda: report_call(job_id, kind, snap["node_name"], used, compact_notes),
         )
-        s.add(r)
-        s.flush()
-        rid = r.id
-        s.get(Job, job_id).result = {
-            "report_id": rid,
-            "warnings": warnings,
-            "generated_papers": len(used),
-        }
+    snap = {**snap, "generated_source_ids": [p["id"] for p in used]}
+    rid = save_report(job_id, token, payload, snap, content, warnings, partial, used)
     finish(
         job_id,
         token,

@@ -1,6 +1,6 @@
 import time
 from sqlalchemy import select, update, or_
-from .db import Session, Job, uid, asdict
+from .db import Session, Job, WorkflowStep, uid, asdict
 
 TERMINAL = {"succeeded", "partial", "failed", "cancelled"}
 
@@ -13,7 +13,7 @@ class BudgetExceeded(Exception):
     pass
 
 
-def submit(kind, payload, parent_id=None):
+def submit(kind, payload, parent_id=None, resume_from=None):
     with Session.begin() as s:
         j = Job(
             kind=kind,
@@ -23,6 +23,19 @@ def submit(kind, payload, parent_id=None):
         )
         s.add(j)
         s.flush()
+        if resume_from and kind == "report":
+            for step in s.scalars(
+                select(WorkflowStep).where(WorkflowStep.job_id == resume_from)
+            ).all():
+                s.add(
+                    WorkflowStep(
+                        job_id=j.id,
+                        name=step.name,
+                        input_hash=step.input_hash,
+                        version=step.version,
+                        output=step.output,
+                    )
+                )
         return asdict(j)
 
 
