@@ -178,7 +178,28 @@ def aggregate():
             if any(c.status not in TERMINAL for c in children):
                 continue
             counts = {k: sum(c.status == k for c in children) for k in TERMINAL}
-            result = {**j.result, "counts": counts}
+            notes = [c.result.get("coverage_note", "") for c in children]
+            downloads = [c.result.get("download") or {} for c in children]
+            total = len(children)
+            fulltext = sum(note.startswith("全文") for note in notes)
+            abstract = sum(note.startswith("摘要") for note in notes)
+            metadata = sum(note.startswith("元数据") for note in notes)
+            candidates = sum(1 for item in downloads if item.get("candidates", 0))
+            attempts = sum(len(item.get("attempts") or []) for item in downloads)
+            success = sum(1 for item in downloads if item.get("success"))
+            archive_stats = {
+                "papers": total,
+                "fulltext": fulltext,
+                "abstract": abstract,
+                "metadata": metadata,
+                "pdf_candidate_papers": candidates,
+                "download_attempts": attempts,
+                "download_success": success,
+                "fulltext_yield": round(fulltext / total, 3) if total else 0,
+                "pdf_candidate_coverage": round(candidates / total, 3) if total else 0,
+                "download_success_rate": round(success / attempts, 3) if attempts else 0,
+            }
+            result = {**j.result, "counts": counts, "archive_stats": archive_stats}
             status = (
                 "cancelled"
                 if j.cancel_requested

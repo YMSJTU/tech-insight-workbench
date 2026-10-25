@@ -370,6 +370,30 @@ function App() {
             {j.result.ranking_mode}
           </p>
         )}
+        {j.kind === "search" && j.result.coverage && (
+          <p className="muted">
+            覆盖率：
+            {j.result.coverage.expected_papers
+              ? `发现 ${j.result.coverage.discovered} / 预期 ${j.result.coverage.expected_papers}（${Math.round(
+                  (j.result.coverage.ratio || 0) * 100,
+                )}%）`
+              : `发现 ${j.result.coverage.discovered} 篇`}
+            {j.result.coverage.non_paper_filtered
+              ? ` · 过滤非论文 ${j.result.coverage.non_paper_filtered} 条`
+              : ""}
+            {j.result.coverage.truncated ? " · 目录未抓全" : ""}
+          </p>
+        )}
+        {j.result.archive_stats && (
+          <p className="muted">
+            归档：全文 {j.result.archive_stats.fulltext} · 摘要{" "}
+            {j.result.archive_stats.abstract} · 元数据{" "}
+            {j.result.archive_stats.metadata} · PDF 候选论文{" "}
+            {j.result.archive_stats.pdf_candidate_papers} · 下载尝试{" "}
+            {j.result.archive_stats.download_attempts}，成功{" "}
+            {j.result.archive_stats.download_success}
+          </p>
+        )}
         {j.result.paper_id && (
           <button
             className="secondary"
@@ -1392,6 +1416,48 @@ function App() {
                 重新分析
               </button>
             </div>
+            {detail.documents?.some((d: Row) => d.assets?.length) && (
+              <details className="asset-section" open>
+                <summary>原文版面、图片与表格</summary>
+                {detail.documents
+                  .filter((d: Row) => d.assets?.length)
+                  .map((d: Row) => (
+                    <div key={d.id} className="asset-grid">
+                      {d.assets.map((asset: Row) => (
+                        <figure key={asset.page} className="asset-card">
+                          {asset.render ? (
+                            <a
+                              href={
+                                "/api/documents/" +
+                                d.id +
+                                "/assets/" +
+                                asset.render
+                              }
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <img
+                                src={
+                                  "/api/documents/" +
+                                  d.id +
+                                  "/assets/" +
+                                  asset.render
+                                }
+                                alt={"第 " + asset.page + " 页版面"}
+                                loading="lazy"
+                              />
+                            </a>
+                          ) : null}
+                          <figcaption>
+                            第 {asset.page} 页 · 图片 {asset.images.length} ·
+                            表格 {asset.tables.length}
+                          </figcaption>
+                        </figure>
+                      ))}
+                    </div>
+                  ))}
+              </details>
+            )}
             <PaperCategoryEditor
               key={detail.id}
               paper={detail}

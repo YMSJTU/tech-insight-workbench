@@ -7,10 +7,25 @@ import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, urljoin, quote
 import httpx
-from .config import MAX_FILE
+from .config import MAX_FILE, unpaywall_email
 
 HEADERS = {"User-Agent": "PaperWorkbench/0.1 (personal research client)"}
+PDF_HEADERS = {
+    **HEADERS,
+    "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.8",
+}
 _arxiv_last = 0.0
+
+
+class DownloadError(Exception):
+    """A classified PDF download failure."""
+
+    def __init__(self, error_class, message="", status=None, content_type=""):
+        self.error_class = error_class
+        self.status = status
+        self.content_type = content_type
+        super().__init__(message or error_class)
 
 
 def clean(s):
@@ -63,32 +78,118 @@ def public_addresses(url):
     return p, ips
 
 
-def download(url):
+def fetch_pdf(url):
+    """Download a PDF with content checks, retries and classified failures."""
+    current = url
+    attempts = 0
+    last_error = ""
     for _ in range(5):
-        parsed, ips = public_addresses(url)
-        target = httpx.URL(url).copy_with(host=ips[0])
-        with httpx.Client(timeout=30, trust_env=False) as client:
-            with client.stream(
-                "GET",
-                target,
-                headers={**HEADERS, "Host": parsed.netloc},
-                extensions={"sni_hostname": parsed.hostname},
-            ) as response:
-                if response.is_redirect:
-                    url = urljoin(url, response.headers["location"])
+        try:
+            parsed, ips = public_addresses(current)
+        except ValueError as exc:
+            raise DownloadError("blocked_url", str(exc)) from None
+        redirect_url = ""
+        for ip in ips[:3]:
+            for backoff in range(3):
+                attempts += 1
+                try:
+                    target = httpx.URL(current).copy_with(host=ip)
+                    with httpx.Client(
+                        timeout=httpx.Timeout(30.0, connect=15.0),
+                        trust_env=False,
+                    ) as client:
+                        with client.stream(
+                            "GET",
+                            target,
+                            headers={**PDF_HEADERS, "Host": parsed.netloc},
+                            extensions={"sni_hostname": parsed.hostname},
+                        ) as response:
+                            if response.is_redirect:
+                                redirect_url = urljoin(
+                                    current, response.headers.get("location", "")
+                                )
+                                break
+                            status = response.status_code
+                            content_type = response.headers.get("content-type", "")
+                            length = response.headers.get("content-length", "")
+                            if length.isdigit() and int(length) > MAX_FILE:
+                                raise DownloadError(
+                                    "too_large",
+                                    "文档超过 25 MB 上限",
+                                    status,
+                                    content_type,
+                                )
+                            if status in {429, 500, 502, 503, 504} and backoff < 2:
+                                time.sleep(backoff + 1)
+                                continue
+                            if status >= 400:
+                                raise DownloadError(
+                                    f"http_{status}",
+                                    f"远程服务 HTTP {status}",
+                                    status,
+                                    content_type,
+                                )
+                            if "text/html" in content_type.lower():
+                                raise DownloadError(
+                                    "not_pdf", "来源返回 HTML 页面", status, content_type
+                                )
+                            data = bytearray()
+                            for chunk in response.iter_bytes():
+                                data.extend(chunk)
+                                if len(data) > MAX_FILE:
+                                    raise DownloadError(
+                                        "too_large",
+                                        "文档超过 25 MB 上限",
+                                        status,
+                                        content_type,
+                                    )
+                                if len(data) >= 1024 and b"%PDF-" not in data[:1024]:
+                                    raise DownloadError(
+                                        "not_pdf",
+                                        "来源内容不是 PDF",
+                                        status,
+                                        content_type,
+                                    )
+                            if b"%PDF-" not in bytes(data[:1024]):
+                                raise DownloadError(
+                                    "not_pdf", "来源内容不是 PDF", status, content_type
+                                )
+                            return bytes(data), {
+                                "url": current,
+                                "final_url": current,
+                                "status": status,
+                                "content_type": content_type,
+                                "bytes": len(data),
+                                "attempts": attempts,
+                            }
+                except DownloadError:
+                    raise
+                except (httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+                    last_error = type(exc).__name__
                     continue
-                response.raise_for_status()
-                data = bytearray()
-                for chunk in response.iter_bytes():
-                    data.extend(chunk)
-                    if len(data) > MAX_FILE:
-                        raise ValueError("文档超过 25 MB 上限")
-                return bytes(data)
-    raise ValueError("重定向过多")
+            if redirect_url:
+                break
+        if redirect_url:
+            current = redirect_url
+            continue
+        raise DownloadError(
+            "network", "网络请求失败或超时：" + last_error, content_type=""
+        )
+    raise DownloadError("redirect_limit", "重定向次数过多")
+
+
+def download(url):
+    data, _ = fetch_pdf(url)
+    return data
 
 
 def crossref_item(x):
     parts = (x.get("published", x.get("issued", {})).get("date-parts") or [[]])[0]
+    pdfs = [
+        a["URL"]
+        for a in x.get("link", [])
+        if a.get("content-type") == "application/pdf" and a.get("URL")
+    ]
     return {
         "title": (x.get("title") or ["无标题"])[0],
         "doi": x.get("DOI", ""),
@@ -101,14 +202,8 @@ def crossref_item(x):
         "url": x.get("URL", ""),
         "abstract": clean(x.get("abstract", "")),
         "source": "crossref",
-        "pdf_url": next(
-            (
-                a["URL"]
-                for a in x.get("link", [])
-                if a.get("content-type") == "application/pdf"
-            ),
-            "",
-        ),
+        "pdf_urls": list(dict.fromkeys(pdfs)),
+        "pdf_url": pdfs[0] if pdfs else "",
     }
 
 
@@ -161,6 +256,11 @@ def parse_arxiv(text):
                 "url": url.replace("http:", "https:"),
                 "abstract": " ".join(get("a:summary").split()),
                 "source": "arxiv",
+                "pdf_urls": [
+                    x.attrib["href"].replace("http:", "https:")
+                    for x in e.findall("a:link", ns)
+                    if x.attrib.get("title") == "pdf"
+                ],
                 "pdf_url": next(
                     (
                         x.attrib["href"].replace("http:", "https:")
@@ -280,6 +380,22 @@ def openalex_item(work):
     source = (work.get("primary_location") or {}).get("source") or {}
     doi = norm_doi(work.get("doi") or "")
     landing = (work.get("primary_location") or {}).get("landing_page_url") or ""
+    locations = [work.get("best_oa_location")] + (work.get("locations") or [])
+    pdfs = []
+    arxiv_id = ""
+    for location in locations:
+        if not location:
+            continue
+        url = location.get("pdf_url")
+        if url and url not in pdfs:
+            pdfs.append(url)
+        page = location.get("landing_page_url") or ""
+        match = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#]+)", page)
+        if match and not arxiv_id:
+            arxiv_id = match.group(1).removesuffix(".pdf")
+    oa_url = (work.get("open_access") or {}).get("oa_url") or ""
+    if oa_url.lower().split("?")[0].endswith(".pdf") and oa_url not in pdfs:
+        pdfs.append(oa_url)
     return {
         "title": work.get("title") or "无标题",
         "doi": doi,
@@ -293,7 +409,9 @@ def openalex_item(work):
         "url": ("https://doi.org/" + doi) if doi else landing,
         "abstract": abstract_from_inverted(work.get("abstract_inverted_index")),
         "source": "openalex",
-        "pdf_url": _openalex_pdf(work),
+        "pdf_urls": pdfs,
+        "pdf_url": pdfs[0] if pdfs else "",
+        "arxiv_id": arxiv_id,
         "openalex_id": (work.get("id") or "").rsplit("/", 1)[-1],
     }
 
@@ -429,3 +547,102 @@ def ranked_venue(candidates, year_from=None, year_to=None):
         )
         unique[key] = c
     return list(unique.values())
+
+
+def _arxiv_id(candidate):
+    if candidate.get("arxiv_id"):
+        return candidate["arxiv_id"]
+    doi = norm_doi(candidate.get("doi") or "")
+    match = re.match(r"10\.48550/arxiv\.(.+)$", doi)
+    if match:
+        return match.group(1)
+    for url in [candidate.get("url", "")] + list(candidate.get("pdf_urls") or []):
+        match = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#]+)", url or "")
+        if match:
+            return match.group(1).removesuffix(".pdf")
+    return ""
+
+
+def _add_pdf(results, url, source):
+    if not url or not isinstance(url, str):
+        return
+    url = url.strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url.lower().startswith(("http://", "https://")):
+        return
+    if any(item["url"] == url for item in results):
+        return
+    results.append({"url": url, "source": source})
+
+
+def static_pdf_candidates(candidate):
+    """PDF URLs already present in the discovery record, no network calls."""
+    result = []
+    for url in candidate.get("pdf_urls") or []:
+        _add_pdf(result, url, candidate.get("source") or "candidate")
+    _add_pdf(result, candidate.get("pdf_url"), candidate.get("source") or "candidate")
+    arxiv_id = _arxiv_id(candidate)
+    if arxiv_id:
+        _add_pdf(result, f"https://arxiv.org/pdf/{arxiv_id}", "arxiv")
+    return result
+
+
+def unpaywall_pdfs(doi):
+    email = unpaywall_email()
+    doi = norm_doi(doi or "")
+    if not email or not doi:
+        return []
+    try:
+        response = httpx.get(
+            "https://api.unpaywall.org/v2/" + quote(doi, safe=""),
+            params={"email": email},
+            headers=HEADERS,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        locations = [data.get("best_oa_location")] + (data.get("oa_locations") or [])
+        return [
+            location.get("url_for_pdf")
+            for location in locations
+            if location and location.get("url_for_pdf")
+        ]
+    except (httpx.HTTPError, ValueError, OSError):
+        return []
+
+
+def openalex_doi_pdfs(doi):
+    doi = norm_doi(doi or "")
+    if not doi:
+        return []
+    try:
+        response = httpx.get(
+            OPENALEX + "/works/https://doi.org/" + quote(doi, safe=""),
+            headers=HEADERS,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return []
+        work = response.json()
+        locations = [work.get("best_oa_location")] + (work.get("locations") or [])
+        return [
+            location.get("pdf_url")
+            for location in locations
+            if location and location.get("pdf_url")
+        ]
+    except (httpx.HTTPError, ValueError, OSError):
+        return []
+
+
+def discover_pdf_candidates(candidate):
+    """Look up additional legal PDF URLs after static candidates are exhausted."""
+    result = []
+    doi = candidate.get("doi") or ""
+    for url in unpaywall_pdfs(doi):
+        _add_pdf(result, url, "unpaywall")
+    if candidate.get("source") != "openalex":
+        for url in openalex_doi_pdfs(doi):
+            _add_pdf(result, url, "openalex")
+    return result

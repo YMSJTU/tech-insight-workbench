@@ -483,10 +483,28 @@ def paper_detail(id_: str):
             if r
             else []
         )
-        result["documents"] = [
-            {k: v for k, v in asdict(d).items() if k != "pages"}
-            for d in s.scalars(select(Document).where(Document.paper_id == id_))
-        ]
+        documents = []
+        for d in s.scalars(select(Document).where(Document.paper_id == id_)):
+            item = {k: v for k, v in asdict(d).items() if k != "pages"}
+            item["assets"] = [
+                {
+                    "page": page.get("page"),
+                    "render": page.get("render", ""),
+                    "images": page.get("images") or [],
+                    "tables": [
+                        {
+                            "bbox": table.get("bbox"),
+                            "rows": len(table.get("rows") or []),
+                            "preview": (table.get("rows") or [])[:3],
+                        }
+                        for table in page.get("tables") or []
+                    ],
+                }
+                for page in d.pages or []
+                if page.get("render") or page.get("images") or page.get("tables")
+            ]
+            documents.append(item)
+        result["documents"] = documents
         result["history"] = [
             {"id": r.id, "created_at": r.created_at, "model": r.model}
             for r in s.scalars(
@@ -511,6 +529,24 @@ def document_file(id_: str):
             filename="paper.pdf",
             content_disposition_type="inline",
         )
+
+
+@app.get("/api/documents/{id_}/assets/{name}")
+def document_asset(id_: str, name: str):
+    with Session() as s:
+        d = require(s, Document, id_)
+        if not d.storage_name:
+            raise HTTPException(404, "该文档没有 PDF 文件")
+        base = (FILES / (d.storage_name + ".assets")).resolve()
+        path = (base / name).resolve()
+        if path.parent != base or not path.exists():
+            raise HTTPException(404, "图表资源不存在")
+        media = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+        }.get(path.suffix.lower(), "application/octet-stream")
+        return FileResponse(path, media_type=media)
 
 
 @app.post("/api/papers/{id_}/reprocess", status_code=202)

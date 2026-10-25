@@ -501,6 +501,20 @@ def test_openalex_item_rebuilds_abstract_and_pdf():
     assert candidate["venue"] == "HPCA"
 
 
+def test_static_pdf_candidates_order_and_arxiv_fallback():
+    assert sources.static_pdf_candidates(
+        {
+            "pdf_urls": ["https://example.org/a.pdf", "https://example.org/b.pdf"],
+            "pdf_url": "https://example.org/b.pdf",
+            "arxiv_id": "2401.00001",
+        }
+    ) == [
+        {"url": "https://example.org/a.pdf", "source": "candidate"},
+        {"url": "https://example.org/b.pdf", "source": "candidate"},
+        {"url": "https://arxiv.org/pdf/2401.00001", "source": "arxiv"},
+    ]
+
+
 def test_venue_search_discovers_all_and_marks_abstract_scope(client, monkeypatch):
     items = [
         {
@@ -555,6 +569,9 @@ def test_venue_search_discovers_all_and_marks_abstract_scope(client, monkeypatch
     assert parent["result"]["mode"] == "venue"
     assert parent["result"]["venue"]["name"] == "HPCA"
     assert parent["result"]["discovered"] == 2
+    assert parent["result"]["coverage"]["expected_papers"] == 2
+    assert parent["result"]["coverage"]["ratio"] == 1
+    assert parent["result"]["archive_stats"]["abstract"] == 2
     assert len(parent["children"]) == 2
     papers = client.get("/api/papers").json()["items"]
     assert len(papers) == 2
@@ -574,6 +591,87 @@ def test_metadata_only_archive_marks_metadata_scope(client):
     paper = client.get("/api/papers/" + result["result"]["paper_id"]).json()
     assert paper["reading_level"] == "metadata"
     assert paper["coverage_note"].startswith("元数据")
+
+
+def test_archive_records_failed_pdf_attempts(client, monkeypatch):
+    from backend.db import DownloadAttempt
+
+    monkeypatch.setattr(
+        sources,
+        "static_pdf_candidates",
+        lambda candidate: [
+            {"url": "https://example.org/a.pdf", "source": "openalex"}
+        ],
+    )
+    monkeypatch.setattr(sources, "discover_pdf_candidates", lambda candidate: [])
+
+    def fail(url):
+        raise sources.DownloadError("http_403", "forbidden", 403, "text/html")
+
+    monkeypatch.setattr(sources, "fetch_pdf", fail)
+    job = client.post(
+        "/api/archive",
+        json={
+            "title": "Fail PDF",
+            "abstract": ABSTRACT,
+            "url": "https://example.org/a.pdf",
+            "max_calls": 0,
+        },
+    ).json()
+    tick()
+    result = client.get("/api/jobs/" + job["id"]).json()
+    paper = client.get("/api/papers/" + result["result"]["paper_id"]).json()
+    assert paper["reading_level"] == "abstract"
+    assert result["result"]["download"]["success"] is False
+    assert result["result"]["download"]["attempts"][0]["error_class"] == "http_403"
+    with Session() as s:
+        attempts = s.query(DownloadAttempt).all()
+        assert len(attempts) == 1
+        assert attempts[0].error_class == "http_403"
+        assert attempts[0].status_code == 403
+
+
+def test_pdf_assets_preserve_images_and_tables(client):
+    from io import BytesIO
+
+    import pymupdf
+
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 80), False)
+    for y in range(80):
+        for x in range(120):
+            pix.set_pixel(x, y, (x * 2 % 256, y * 3 % 256, (x + y) % 256))
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Visual paper " * 40)
+    page.insert_image(pymupdf.Rect(72, 260, 192, 340), stream=pix.tobytes("png"))
+    for x in [72, 150, 228]:
+        page.draw_line((x, 100), (x, 180))
+    for y in [100, 120, 140, 160, 180]:
+        page.draw_line((72, y), (228, y))
+    for index, (x, y) in enumerate(
+        [(80, 115), (158, 115), (80, 155), (158, 155)]
+    ):
+        page.insert_text((x, y), "cell" + str(index))
+    buffer = BytesIO()
+    doc.save(buffer)
+    job = client.post(
+        "/api/upload",
+        files={"file": ("visual.pdf", buffer.getvalue(), "application/pdf")},
+    ).json()
+    tick()
+    result = client.get("/api/jobs/" + job["id"]).json()
+    detail = client.get("/api/papers/" + result["result"]["paper_id"]).json()
+    document = detail["documents"][0]
+    assets = document["assets"]
+    assert any(asset["render"] for asset in assets)
+    assert any(asset["images"] for asset in assets)
+    assert any(asset["tables"] for asset in assets)
+    render = next(asset["render"] for asset in assets if asset["render"])
+    response = client.get(
+        "/api/documents/" + document["id"] + "/assets/" + render
+    )
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xff\xd8")
 
 
 def test_no_pdf_text_reports_partial(client):

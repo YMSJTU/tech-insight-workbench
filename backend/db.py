@@ -56,6 +56,21 @@ class Document(Base):
     pages: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class DownloadAttempt(Base):
+    __tablename__ = "download_attempts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    paper_id: Mapped[str] = mapped_column(String(36), index=True)
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    url: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(30), default="")
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str] = mapped_column(String(120), default="")
+    bytes: Mapped[int] = mapped_column(Integer, default=0)
+    error_class: Mapped[str] = mapped_column(String(40), default="")
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Run(Base):
     __tablename__ = "runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

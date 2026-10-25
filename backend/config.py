@@ -41,3 +41,22 @@ def model_ready():
     except ValueError:
         return False
     return bool(shutil.which(first) or Path(first).exists())
+
+
+def unpaywall_email():
+    return os.getenv("UNPAYWALL_EMAIL", "").strip()
+
+
+def pdf_settings():
+    try:
+        candidates = int(os.getenv("PDF_MAX_CANDIDATES", "3"))
+    except ValueError:
+        candidates = 3
+    try:
+        dpi = int(os.getenv("PDF_RENDER_DPI", "110"))
+    except ValueError:
+        dpi = 110
+    return {
+        "max_candidates": min(5, max(1, candidates)),
+        "render_dpi": min(160, max(72, dpi)),
+    }

@@ -997,6 +997,40 @@ header {
   padding: 9px 12px;
   margin: 10px 0 16px;
 }
+.asset-section {
+  margin: 20px 0 24px;
+  border-top: 1px solid #edf0e8;
+  padding-top: 16px;
+}
+.asset-section summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2f4a3b;
+}
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.asset-card {
+  margin: 0;
+  border: 1px solid #e2e7df;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fafcf8;
+}
+.asset-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.asset-card figcaption {
+  padding: 7px 9px;
+  font-size: 10px;
+  color: #7f9186;
+}
 .suggestions {
   display: flex;
   flex-wrap: wrap;

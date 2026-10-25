@@ -2,13 +2,15 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from sqlalchemy import select, func, update
-from .config import FILES, ROOT, agent_model, model_ready
+from .config import FILES, ROOT, agent_model, model_ready, pdf_settings
 from .db import (
     Session,
     Paper,
     Document,
+    DownloadAttempt,
     Run,
     Technique,
     Evidence,
@@ -49,7 +51,7 @@ def parse_file(name):
         [sys.executable, "-m", "backend.parse_pdf", str(path)],
         cwd=ROOT,
         capture_output=True,
-        timeout=60,
+        timeout=120,
     )
     if r.returncode:
         raise ValueError("PDF 无法解析，可能加密或损坏")
@@ -57,6 +59,28 @@ def parse_file(name):
     if sum(len(p["text"].strip()) for p in pages) < 80:
         raise ValueError("PDF 可提取文本不足；扫描件需要 OCR，当前未启用")
     return pages
+
+
+def record_download_attempt(paper_id, job_id, candidate, started, meta=None, error=None):
+    elapsed = int((time.monotonic() - started) * 1000)
+    with Session.begin() as s:
+        s.add(
+            DownloadAttempt(
+                paper_id=paper_id,
+                job_id=job_id,
+                url=candidate["url"],
+                source=candidate.get("source", ""),
+                status_code=(meta or {}).get("status")
+                if meta
+                else getattr(error, "status", None),
+                content_type=(meta or {}).get("content_type", "")
+                if meta
+                else getattr(error, "content_type", ""),
+                bytes=(meta or {}).get("bytes", 0) if meta else 0,
+                error_class="" if meta else getattr(error, "error_class", "error"),
+                elapsed_ms=elapsed,
+            )
+        )
 
 
 def blocks_for(pages):
@@ -125,22 +149,111 @@ def archive(job_id, token, payload):
     kind = "abstract"
     storage = c.get("storage_name", "")
     sha = c.get("sha256", "")
+    pdf_report = {
+        "candidates": 0,
+        "attempts": [],
+        "success": False,
+        "error_classes": [],
+    }
     if storage:
         try:
             pages = parse_file(storage)
             kind = "fulltext"
         except Exception as exc:
             warnings.append(safe_error(exc))
-    elif c.get("pdf_url"):
-        try:
-            data = sources.download(c["pdf_url"])
-            if not data.startswith(b"%PDF-"):
-                raise ValueError("来源返回的内容不是 PDF")
-            storage, sha = save_file(data)
-            pages = parse_file(storage)
-            kind = "fulltext"
-        except Exception as exc:
-            warnings.append("全文获取失败：" + safe_error(exc))
+    elif not c.get("text"):
+        candidates = sources.static_pdf_candidates(c)
+        discovered = False
+        if not candidates:
+            candidates = sources.discover_pdf_candidates(c)
+            discovered = True
+        pdf_report["candidates"] = len(candidates)
+        max_candidates = pdf_settings()["max_candidates"]
+        index = 0
+        tried = 0
+        while index < len(candidates) and tried < max_candidates:
+            candidate = candidates[index]
+            index += 1
+            tried += 1
+            started = time.monotonic()
+            try:
+                data, meta = sources.fetch_pdf(candidate["url"])
+            except sources.DownloadError as exc:
+                record_download_attempt(paper_id, job_id, candidate, started, error=exc)
+                pdf_report["attempts"].append(
+                    {
+                        "url": candidate["url"],
+                        "source": candidate.get("source", ""),
+                        "error_class": exc.error_class,
+                        "status": exc.status,
+                    }
+                )
+                pdf_report["error_classes"].append(exc.error_class)
+            except Exception as exc:
+                download_error = sources.DownloadError(
+                    "error", f"{type(exc).__name__}: {exc}"
+                )
+                record_download_attempt(
+                    paper_id, job_id, candidate, started, error=download_error
+                )
+                pdf_report["attempts"].append(
+                    {
+                        "url": candidate["url"],
+                        "source": candidate.get("source", ""),
+                        "error_class": "error",
+                        "status": None,
+                    }
+                )
+                pdf_report["error_classes"].append("error")
+            else:
+                try:
+                    storage, sha = save_file(data)
+                    pages = parse_file(storage)
+                    kind = "fulltext"
+                except Exception as exc:
+                    parse_error = sources.DownloadError("parse_error", str(exc))
+                    record_download_attempt(
+                        paper_id, job_id, candidate, started, error=parse_error
+                    )
+                    pdf_report["attempts"].append(
+                        {
+                            "url": candidate["url"],
+                            "source": candidate.get("source", ""),
+                            "error_class": "parse_error",
+                            "status": meta.get("status"),
+                        }
+                    )
+                    pdf_report["error_classes"].append("parse_error")
+                else:
+                    record_download_attempt(
+                        paper_id, job_id, candidate, started, meta=meta
+                    )
+                    pdf_report["attempts"].append(
+                        {
+                            "url": candidate["url"],
+                            "source": candidate.get("source", ""),
+                            "error_class": "",
+                            "status": meta.get("status"),
+                        }
+                    )
+                    pdf_report["success"] = True
+                    break
+            if (
+                index >= len(candidates)
+                and not discovered
+                and tried < max_candidates
+            ):
+                extra = sources.discover_pdf_candidates(c)
+                known = {item["url"] for item in candidates}
+                for item in extra:
+                    if item["url"] not in known:
+                        candidates.append(item)
+                        known.add(item["url"])
+                discovered = True
+                pdf_report["candidates"] = len(candidates)
+        if not pdf_report["success"] and pdf_report["attempts"]:
+            classes = sorted(set(pdf_report["error_classes"]))
+            warnings.append("全文获取失败：" + "、".join(classes))
     if not pages and c.get("text"):
         pages = [{"page": 1, "text": c["text"]}]
         kind = "fulltext"
@@ -174,12 +287,21 @@ def archive(job_id, token, payload):
             {
                 "paper_id": paper_id,
                 "coverage_note": note,
+                "download": pdf_report,
                 "warnings": warnings + ["没有可阅读内容，仅保存元数据"],
             },
         )
         return
     if kind == "fulltext":
-        note = f"全文：已解析 PDF（{len(pages)} 页）" if storage else "全文：已保存正文"
+        if storage:
+            visuals = sum(
+                len(page.get("images") or []) + len(page.get("tables") or [])
+                for page in pages
+            )
+            suffix = f"，图表 {visuals} 处" if visuals else ""
+            note = f"全文：已解析 PDF（{len(pages)} 页{suffix}）"
+        else:
+            note = "全文：已保存正文"
     else:
         note = "摘要：未获取到可下载全文，仅归档摘要"
     if not sha:
@@ -222,6 +344,7 @@ def archive(job_id, token, payload):
             {
                 "paper_id": paper_id,
                 "coverage_note": note,
+                "download": pdf_report,
                 "warnings": warnings + [reason],
             },
         )
@@ -248,6 +371,7 @@ def archive(job_id, token, payload):
                     "paper_id": paper_id,
                     "run_id": prior.id,
                     "coverage_note": note,
+                    "download": pdf_report,
                     "warnings": warnings,
                     "reused": True,
                 },
@@ -277,6 +401,7 @@ def archive(job_id, token, payload):
             {
                 "paper_id": paper_id,
                 "coverage_note": note,
+                "download": pdf_report,
                 "warnings": warnings + ["没有通过证据校验的技术输出"],
             },
         )
@@ -370,6 +495,7 @@ def archive(job_id, token, payload):
             "paper_id": paper_id,
             "run_id": run.id,
             "coverage_note": note,
+            "download": pdf_report,
             "warnings": warnings,
             "references_removed": references_removed,
         }
@@ -381,6 +507,7 @@ def archive(job_id, token, payload):
             "paper_id": paper_id,
             "run_id": run.id,
             "coverage_note": note,
+            "download": pdf_report,
             "warnings": warnings,
             "references_removed": references_removed,
         },
@@ -409,6 +536,7 @@ def search(job_id, token, payload):
     venue_info = None
     semantic_applied = False
     excluded_count = 0
+    source_stats = {}
     if mode == "venue":
         stage(job_id, token, "解析会议/期刊")
         try:
@@ -474,7 +602,17 @@ def search(job_id, token, payload):
                     )
                     candidates.extend([{**x, "query": query} for x in items])
                     successes += 1
+                    stats = source_stats.setdefault(
+                        source, {"queries": 0, "fetched": 0, "errors": []}
+                    )
+                    stats["queries"] += 1
+                    stats["fetched"] += len(items)
                 except Exception as exc:
+                    stats = source_stats.setdefault(
+                        source, {"queries": 0, "fetched": 0, "errors": []}
+                    )
+                    stats["queries"] += 1
+                    stats["errors"].append(safe_error(exc))
                     warnings.append(source + "：" + safe_error(exc))
         ranked = sources.ranked(
             candidates,
@@ -509,6 +647,27 @@ def search(job_id, token, payload):
         selected = eligible[: payload["limit"]]
     else:
         selected = ranked[: payload["limit"]]
+    if mode == "venue":
+        expected = venue_info.get("total") or len(ranked)
+        coverage = {
+            "mode": "venue",
+            "source": venue_info.get("name"),
+            "source_total": venue_info.get("raw_total"),
+            "non_paper_filtered": venue_info.get("filtered_out", 0),
+            "expected_papers": expected,
+            "discovered": len(ranked),
+            "selected": len(selected),
+            "truncated": bool(venue_info.get("truncated")),
+            "ratio": round(min(1, len(ranked) / expected), 3) if expected else 0,
+        }
+    else:
+        coverage = {
+            "mode": "topic",
+            "sources": source_stats,
+            "discovered": len(ranked),
+            "selected": len(selected),
+            "truncated": False,
+        }
     stage(job_id, token, "提交自动归档")
     # Child creation and discovery result are atomic, so a recovered search cannot duplicate children.
     with Session.begin() as s:
@@ -534,6 +693,7 @@ def search(job_id, token, payload):
             "selected": selected,
             "warnings": warnings,
             "discovered": len(ranked),
+            "coverage": coverage,
             "ranking_mode": ranking_mode,
             "discovery_complete": True,
             "semantic_threshold_applied": semantic_applied,
